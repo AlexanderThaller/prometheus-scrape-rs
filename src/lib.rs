@@ -3,3 +3,4 @@
 //! by a standard `prometheus.yml` (agent-mode subset).
 
 pub mod model;
+pub mod relabel;
