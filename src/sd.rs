@@ -27,12 +27,12 @@ pub struct TargetGroup {
 
 /// Start discovery for one scrape config.
 ///
-/// The receiver always holds the current full set of target groups (static
-/// groups first, then `file_sd` groups). A refresher task is spawned only when
-/// `file_sd_configs` is present; it re-reads the files every
-/// `refresh_interval` and publishes only on change.
+/// The receiver always holds the current full set of target groups: static
+/// groups first, then one slot per dynamic source (`file_sd`, one per
+/// `kubernetes_sd_configs` entry). Each source pushes complete snapshots to
+/// a merger task which publishes only on change.
 #[must_use]
-pub fn watch(config: &ScrapeConfig) -> (watch::Receiver<Vec<TargetGroup>>, Option<JoinHandle<()>>) {
+pub fn watch(config: &ScrapeConfig) -> (watch::Receiver<Vec<TargetGroup>>, Vec<JoinHandle<()>>) {
     let static_groups: Vec<TargetGroup> = config
         .static_configs
         .iter()
@@ -42,43 +42,75 @@ pub fn watch(config: &ScrapeConfig) -> (watch::Receiver<Vec<TargetGroup>>, Optio
         })
         .collect();
 
-    if config.file_sd_configs.is_empty() {
+    let has_files = !config.file_sd_configs.is_empty();
+    let kubernetes_count = config.kubernetes_sd_configs.len();
+    if !has_files && kubernetes_count == 0 {
         let (_tx, rx) = watch::channel(static_groups);
-        return (rx, None);
+        return (rx, Vec::new());
     }
 
-    let file_sd_configs = config.file_sd_configs.clone();
     let job = config.job_name.clone();
-    let mut initial = static_groups.clone();
-    initial.extend(read_file_sd(&file_sd_configs, &job));
-    let (tx, rx) = watch::channel(initial);
+    let slot_count = usize::from(has_files) + kubernetes_count;
+    let (update_tx, mut update_rx) =
+        tokio::sync::mpsc::channel::<(usize, Vec<TargetGroup>)>(slot_count.max(1) * 2);
+    let mut tasks: Vec<JoinHandle<()>> = Vec::new();
+    let mut slot = 0;
 
-    let refresh = file_sd_configs
-        .iter()
-        .map(|c| c.refresh_interval.as_duration())
-        .min()
-        .unwrap_or(std::time::Duration::from_secs(300));
+    if has_files {
+        let file_sd_configs = config.file_sd_configs.clone();
+        let job = job.clone();
+        let update = update_tx.clone();
+        let file_slot = slot;
+        slot += 1;
+        tasks.push(tokio::spawn(async move {
+            let refresh = file_sd_configs
+                .iter()
+                .map(|c| c.refresh_interval.as_duration())
+                .min()
+                .unwrap_or(std::time::Duration::from_secs(300));
+            let mut ticker = tokio::time::interval(refresh);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                ticker.tick().await;
+                let groups = read_file_sd(&file_sd_configs, &job);
+                if update.send((file_slot, groups)).await.is_err() {
+                    return;
+                }
+            }
+        }));
+    }
+    for kubernetes_sd in &config.kubernetes_sd_configs {
+        tasks.push(tokio::spawn(crate::sd_k8s::run(
+            job.clone(),
+            kubernetes_sd.clone(),
+            slot,
+            update_tx.clone(),
+        )));
+        slot += 1;
+    }
+    drop(update_tx);
 
-    let handle = tokio::spawn(async move {
-        let mut ticker = tokio::time::interval(refresh);
-        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        ticker.tick().await; // first tick fires immediately; initial state is already set
-        loop {
-            ticker.tick().await;
-            let mut groups = static_groups.clone();
-            groups.extend(read_file_sd(&file_sd_configs, &job));
+    let (tx, rx) = watch::channel(static_groups.clone());
+    tasks.push(tokio::spawn(async move {
+        let mut slots: Vec<Vec<TargetGroup>> = vec![Vec::new(); slot_count];
+        while let Some((index, groups)) = update_rx.recv().await {
+            slots[index] = groups;
+            let mut merged = static_groups.clone();
+            for source in &slots {
+                merged.extend(source.iter().cloned());
+            }
             tx.send_if_modified(|current| {
-                if *current == groups {
+                if *current == merged {
                     false
                 } else {
-                    debug!(job, groups = groups.len(), "file_sd targets changed");
-                    *current = groups;
+                    debug!(job, groups = merged.len(), "discovered targets changed");
+                    *current = merged;
                     true
                 }
             });
         }
-    });
-    (rx, Some(handle))
+    }));
+    (rx, tasks)
 }
 
 /// Read and parse all `file_sd` files. Unreadable or malformed files are

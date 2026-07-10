@@ -106,7 +106,7 @@ async fn run_job(
         }
     };
 
-    let (mut groups_rx, _sd_task) = crate::sd::watch(&job);
+    let (mut groups_rx, _sd_tasks) = crate::sd::watch(&job);
     let mut target_tasks: Vec<JoinHandle<()>> = Vec::new();
     loop {
         let groups = groups_rx.borrow_and_update().clone();
