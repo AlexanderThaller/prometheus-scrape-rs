@@ -121,6 +121,7 @@ pub struct ScrapeConfig {
     pub sample_limit: u64,
     pub static_configs: Vec<StaticConfig>,
     pub file_sd_configs: Vec<FileSdConfig>,
+    pub kubernetes_sd_configs: Vec<KubernetesSdConfig>,
     pub relabel_configs: Vec<RelabelConfig>,
     pub metric_relabel_configs: Vec<RelabelConfig>,
 }
@@ -144,6 +145,7 @@ impl Default for ScrapeConfig {
             sample_limit: 0,
             static_configs: Vec::new(),
             file_sd_configs: Vec::new(),
+            kubernetes_sd_configs: Vec::new(),
             relabel_configs: Vec::new(),
             metric_relabel_configs: Vec::new(),
         }
@@ -189,8 +191,68 @@ impl ScrapeConfig {
             self.bearer_token.as_ref(),
         )
         .map_err(|err| anyhow::anyhow!("scrape config {:?}: {err}", self.job_name))?;
+        for kubernetes_sd in &self.kubernetes_sd_configs {
+            kubernetes_sd
+                .validate()
+                .map_err(|err| anyhow::anyhow!("scrape config {:?}: {err}", self.job_name))?;
+        }
         Ok(())
     }
+}
+
+/// Kubernetes service discovery (`kubernetes_sd_configs`).
+///
+/// The client configuration (API server, credentials) always comes from the
+/// environment — in-cluster service account or `KUBECONFIG` — matching how
+/// Prometheus is deployed by prometheus-operator. The `api_server`,
+/// `kubeconfig_file` and `selectors` fields are not supported.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct KubernetesSdConfig {
+    pub role: KubernetesRole,
+    pub namespaces: NamespaceDiscovery,
+    pub attach_metadata: AttachMetadata,
+}
+
+impl KubernetesSdConfig {
+    fn validate(&self) -> Result<(), String> {
+        match self.role {
+            KubernetesRole::Pod | KubernetesRole::Endpointslice => Ok(()),
+            unsupported => Err(format!(
+                "kubernetes_sd_configs role {unsupported:?} is not supported yet \
+                 (supported: pod, endpointslice)"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KubernetesRole {
+    #[default]
+    Pod,
+    Endpointslice,
+    Endpoints,
+    Service,
+    Node,
+    Ingress,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct NamespaceDiscovery {
+    /// Discover in the namespace this agent runs in (read from the service
+    /// account namespace file).
+    pub own_namespace: bool,
+    /// Namespaces to discover in; empty means all namespaces.
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct AttachMetadata {
+    /// Attach `__meta_kubernetes_node_*` labels of the node running the pod.
+    pub node: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -547,6 +609,46 @@ global:
                 "error should mention agent mode: {err}"
             );
         }
+    }
+
+    #[test]
+    fn parses_kubernetes_sd_configs() {
+        let yaml = r"
+job_name: kube
+kubernetes_sd_configs:
+  - role: endpointslice
+    namespaces:
+      names:
+        - monitoring
+        - default
+  - role: pod
+    attach_metadata:
+      node: true
+";
+        let config: ScrapeConfig = serde_saphyr::from_str(yaml).expect("must parse");
+        config.validate().expect("must validate");
+        assert_eq!(config.kubernetes_sd_configs.len(), 2);
+        assert_eq!(
+            config.kubernetes_sd_configs[0].role,
+            KubernetesRole::Endpointslice
+        );
+        assert_eq!(
+            config.kubernetes_sd_configs[0].namespaces.names,
+            vec!["monitoring", "default"]
+        );
+        assert!(config.kubernetes_sd_configs[1].attach_metadata.node);
+    }
+
+    #[test]
+    fn rejects_unsupported_kubernetes_roles() {
+        let yaml = "
+job_name: kube
+kubernetes_sd_configs:
+  - role: ingress
+";
+        let config: ScrapeConfig = serde_saphyr::from_str(yaml).expect("must parse");
+        let err = config.validate().expect_err("must fail").to_string();
+        assert!(err.contains("not supported yet"), "unexpected error: {err}");
     }
 
     #[test]
