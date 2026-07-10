@@ -6,7 +6,10 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+futures = { version = "0.3", default-features = false, features = ["std"] }
 glob = "0.3"
+k8s-openapi = { version = "0.28", features = ["latest"] }
+kube = { version = "4", default-features = false, features = ["client", "runtime", "rustls-tls"] }
 md-5 = "0.11"
 prost = "0.14"
 regex = "1"
