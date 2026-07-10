@@ -14,6 +14,22 @@ prometheus-scrape-rs --config.file prometheus.yml [--log.level info]
 
 See [`example/prometheus.yml`](example/prometheus.yml) for a full example.
 
+## Web endpoint
+
+A minimal HTTP endpoint (default `0.0.0.0:9090`, `--web.listen-address`)
+serves Kubernetes-style probes — there is deliberately no web UI:
+
+- `GET /-/healthy` — liveness
+- `GET /-/ready` — readiness (200 once scraping runs)
+- `POST /-/reload`, `POST /-/quit` — lifecycle API, enabled with
+  `--web.enable-lifecycle`; a failed reload keeps the current config
+  running and returns 500, like Prometheus. SIGHUP also reloads.
+
+For drop-in use in existing Prometheus deployments (e.g. via
+prometheus-operator), the server-only flags `--agent`,
+`--storage.agent.path`, `--web.config.file` and `--web.route-prefix` are
+accepted and ignored (hidden from `--help`).
+
 ## Supported configuration
 
 The agent-mode subset of the Prometheus configuration format:
