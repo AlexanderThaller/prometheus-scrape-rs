@@ -39,8 +39,8 @@ The agent-mode subset of the Prometheus configuration format:
   `scrape_interval`/`scrape_timeout` overrides, `honor_labels`,
   `honor_timestamps`, `sample_limit`, `basic_auth`, `authorization`,
   `bearer_token(_file)`, `tls_config` (`insecure_skip_verify`, `ca_file`),
-  `static_configs`, `file_sd_configs`, `relabel_configs`,
-  `metric_relabel_configs`
+  `static_configs`, `file_sd_configs`, `kubernetes_sd_configs`,
+  `relabel_configs`, `metric_relabel_configs`
 - `remote_write`: `url`, `name`, `remote_timeout`, `headers`, auth as above,
   `write_relabel_configs`, `queue_config` (`capacity`,
   `max_samples_per_send`, `batch_send_deadline`, `min_backoff`,
@@ -55,6 +55,21 @@ Unknown configuration fields are rejected at startup so unsupported setups
 Per-target synthetic series (`up`, `scrape_duration_seconds`,
 `scrape_samples_scraped`, `scrape_samples_post_metric_relabeling`,
 `scrape_series_added`) are emitted like Prometheus does.
+
+### Kubernetes service discovery
+
+`kubernetes_sd_configs` supports the `pod` and `endpointslice` roles — the
+two prometheus-operator generates for podMonitors and serviceMonitors —
+with `namespaces` (`names`, `own_namespace`) and `attach_metadata.node`.
+Targets carry the standard `__meta_kubernetes_*` labels so operator
+generated relabel rules work unchanged. Client configuration comes from
+the environment (in-cluster service account or `KUBECONFIG`); `api_server`,
+`kubeconfig_file` and `selectors` are not supported.
+
+Required RBAC: `get`/`list`/`watch` on `pods`, `services`,
+`endpointslices` (API group `discovery.k8s.io`), and `nodes` when
+`attach_metadata.node` is used — the same rules the prometheus-operator
+ships for Prometheus itself.
 
 ## Design notes
 
@@ -80,7 +95,9 @@ Per-target synthetic series (`up`, `scrape_duration_seconds`,
 - No WAL: samples buffered in memory only; a long remote-storage outage
   drops data that Prometheus agent would have kept on disk.
 - No staleness markers when a target disappears or a series vanishes.
-- Service discovery is `static_configs` + `file_sd_configs` only.
+- Service discovery: `static_configs`, `file_sd_configs` and
+  `kubernetes_sd_configs` (`pod`/`endpointslice` roles); other roles and
+  SD mechanisms are rejected at startup.
 - No client TLS certificates (`cert_file`/`key_file`) yet.
 
 ## Development
