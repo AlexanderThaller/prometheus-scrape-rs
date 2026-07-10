@@ -1,0 +1,43 @@
+[package]
+name = "prometheus-scrape-rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+clap = { version = "4.6.1", features = ["derive"] }
+glob = "0.3.3"
+md-5 = "0.11.0"
+prost = "0.14.4"
+regex = "1.13.0"
+reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "gzip", "http2", "query"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde-saphyr = "0.0.29"
+snap = "1.1.1"
+thiserror = "2.0.18"
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "time", "signal", "sync", "fs"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+
+[lints.rust]
+#missing-docs = "warn"
+missing-debug-implementations = "warn"
+rust-2018-idioms = "warn"
+unsafe-code = "forbid"
+unused-lifetimes = "warn"
+
+[lints.clippy]
+allow-attributes = "warn"
+allow-attributes-without-reason = "warn"
+dbg-macro = "warn"
+pedantic = { level = "warn", priority = -1 }
+todo = "warn"
+unwrap-used = "warn"
+missing-panics-doc = "allow"
+missing-errors-doc = "allow"
+
+[profile.deploy]
+inherits = "release"
+lto = true
+codegen-units = 1
+panic = "abort"
