@@ -1,0 +1,47 @@
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  external_labels:
+    region: eu-west-1
+    replica: agent-0
+
+scrape_configs:
+  - job_name: node
+    static_configs:
+      - targets: ["localhost:9100"]
+        labels:
+          env: prod
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        regex: "([^:]+):.*"
+        replacement: "$1"
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "node_(cpu|memory|filesystem|network).*"
+        action: keep
+
+  - job_name: services
+    scrape_interval: 30s
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/*.yml
+          - /etc/prometheus/targets/*.json
+        refresh_interval: 1m
+
+remote_write:
+  - url: https://mimir.example.com/api/v1/push
+    name: durable-storage
+    basic_auth:
+      username: agent
+      password_file: /etc/prometheus/remote-write.password
+    headers:
+      X-Scope-OrgID: my-tenant
+    queue_config:
+      max_samples_per_send: 2000
+      batch_send_deadline: 5s
+      capacity: 10000
+    write_relabel_configs:
+      - source_labels: [__name__]
+        regex: "go_gc_.*"
+        action: drop
