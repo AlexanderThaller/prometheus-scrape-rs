@@ -8,4 +8,5 @@ pub mod model;
 pub mod parser;
 pub mod relabel;
 pub mod remote_write;
+pub mod scrape;
 pub mod sd;
