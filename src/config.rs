@@ -39,10 +39,28 @@ pub struct Config {
     pub global: GlobalConfig,
     pub scrape_configs: Vec<ScrapeConfig>,
     pub remote_write: Vec<RemoteWriteConfig>,
+    // Server-only sections. Parsed so a server config is diagnosed with a
+    // clear "not supported in agent mode" error instead of a generic
+    // unknown-field failure, mirroring Prometheus --agent.
+    rule_files: Option<serde::de::IgnoredAny>,
+    alerting: Option<serde::de::IgnoredAny>,
+    remote_read: Option<serde::de::IgnoredAny>,
 }
 
 impl Config {
     fn validate(&self) -> anyhow::Result<()> {
+        for (section, value) in [
+            ("rule_files", &self.rule_files),
+            ("alerting", &self.alerting),
+            ("remote_read", &self.remote_read),
+        ] {
+            if value.is_some() {
+                anyhow::bail!(
+                    "field {section} is not supported: this is a scraping agent \
+                     (like Prometheus agent mode); remove the section from the config"
+                );
+            }
+        }
         let mut seen_job_names = std::collections::HashSet::new();
         for scrape_config in &self.scrape_configs {
             scrape_config.validate()?;
@@ -66,6 +84,10 @@ pub struct GlobalConfig {
     pub scrape_interval: PromDuration,
     pub scrape_timeout: PromDuration,
     pub external_labels: BTreeMap<String, String>,
+    // Accepted but unused, like Prometheus agent mode: rule evaluation and
+    // query logging do not exist in a scraping agent.
+    evaluation_interval: Option<PromDuration>,
+    query_log_file: Option<String>,
 }
 
 impl Default for GlobalConfig {
@@ -74,6 +96,8 @@ impl Default for GlobalConfig {
             scrape_interval: PromDuration::from_secs(60),
             scrape_timeout: PromDuration::from_secs(10),
             external_labels: BTreeMap::new(),
+            evaluation_interval: None,
+            query_log_file: None,
         }
     }
 }
@@ -496,6 +520,34 @@ impl<'de> Deserialize<'de> for PromDuration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepts_server_only_global_fields() {
+        let yaml = r"
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  query_log_file: /var/log/queries.log
+";
+        let config: Config = serde_saphyr::from_str(yaml).expect("must parse");
+        assert_eq!(
+            config.global.scrape_interval.as_duration(),
+            Duration::from_secs(15)
+        );
+    }
+
+    #[test]
+    fn rejects_server_only_sections_with_agent_hint() {
+        for section in ["rule_files: ['alerts.yml']", "alerting: {}", "remote_read: []"] {
+            let yaml = format!("{section}\nscrape_configs: []\n");
+            let config: Config = serde_saphyr::from_str(&yaml).expect("must parse");
+            let err = config.validate().expect_err("must be rejected").to_string();
+            assert!(
+                err.contains("agent mode"),
+                "error should mention agent mode: {err}"
+            );
+        }
+    }
 
     #[test]
     fn parses_realistic_agent_config() {
