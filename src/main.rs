@@ -1,17 +1,15 @@
-use std::{
-    path::PathBuf,
-    sync::Arc,
-};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use anyhow::Context as _;
 use clap::Parser as _;
-use tracing::info;
+use tokio::signal::unix::{SignalKind, signal};
+use tokio::sync::mpsc;
+use tracing::{error, info, warn};
 
-use prometheus_scrape_rs::{
-    config,
-    remote_write,
-    scrape,
-};
+use prometheus_scrape_rs::web::{LifecycleCommand, LifecycleRequest, WebState};
+use prometheus_scrape_rs::{config, remote_write, scrape, web};
 
 /// A lightweight Prometheus agent: scrape targets, forward via `remote_write`.
 #[derive(Debug, clap::Parser)]
@@ -24,6 +22,60 @@ struct Args {
     /// Log filter, e.g. "info" or "`prometheus_scrape_rs=debug`".
     #[arg(long = "log.level", default_value = "info")]
     log_level: String,
+
+    /// Address for the probe/lifecycle HTTP endpoint (no web UI is served).
+    #[arg(long = "web.listen-address", default_value = "0.0.0.0:9090")]
+    web_listen_address: String,
+
+    /// Enable the /-/reload and /-/quit lifecycle endpoints.
+    #[arg(long = "web.enable-lifecycle")]
+    web_enable_lifecycle: bool,
+
+    // Prometheus server flags accepted for drop-in compatibility (e.g. when
+    // deployed via prometheus-operator) but without function here. Hidden
+    // from --help.
+    /// Accepted for Prometheus compatibility; this binary is always an agent.
+    #[arg(long = "agent", hide = true)]
+    agent: bool,
+
+    /// Accepted for Prometheus compatibility; there is no local storage/WAL.
+    #[arg(long = "storage.agent.path", hide = true)]
+    storage_agent_path: Option<PathBuf>,
+
+    /// Accepted for Prometheus compatibility; TLS/auth for the web endpoint
+    /// is not supported, probes are served over plain HTTP.
+    #[arg(long = "web.config.file", hide = true)]
+    web_config_file: Option<PathBuf>,
+
+    /// Accepted for Prometheus compatibility; only "/" is supported.
+    #[arg(long = "web.route-prefix", hide = true, default_value = "/")]
+    web_route_prefix: String,
+}
+
+impl Args {
+    fn warn_ignored(&self) {
+        if self.agent {
+            info!("--agent: this binary is always an agent; flag accepted for compatibility");
+        }
+        if let Some(path) = &self.storage_agent_path {
+            info!(
+                path = %path.display(),
+                "--storage.agent.path is ignored: no local storage/WAL"
+            );
+        }
+        if let Some(path) = &self.web_config_file {
+            warn!(
+                path = %path.display(),
+                "--web.config.file is ignored: probe endpoint is plain HTTP without auth"
+            );
+        }
+        if self.web_route_prefix != "/" {
+            warn!(
+                prefix = self.web_route_prefix,
+                "--web.route-prefix is ignored: endpoints are served under /"
+            );
+        }
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -35,54 +87,147 @@ fn main() -> anyhow::Result<()> {
                 .parse_lossy(&args.log_level),
         )
         .init();
-
-    let config = Arc::new(
-        config::load(&args.config_file)
-            .with_context(|| format!("loading config {}", args.config_file.display()))?,
-    );
-    info!(
-        config = %args.config_file.display(),
-        jobs = config.scrape_configs.len(),
-        remote_writes = config.remote_write.len(),
-        "configuration loaded"
-    );
-    if config.remote_write.is_empty() {
-        anyhow::bail!("no remote_write endpoints configured; scraped data would be discarded");
-    }
+    args.warn_ignored();
 
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("building tokio runtime")?
-        .block_on(run(config))
+        .block_on(run(&args))
 }
 
-async fn run(config: Arc<config::Config>) -> anyhow::Result<()> {
-    let (remote_handle, sender_tasks) =
-        remote_write::spawn(&config.remote_write).context("starting remote-write senders")?;
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let scrape_tasks = scrape::spawn_jobs(&config, &remote_handle, &shutdown_rx);
-    drop(shutdown_rx);
-
-    tokio::signal::ctrl_c()
-        .await
-        .context("waiting for shutdown signal")?;
-    info!("shutdown signal received; stopping scrapes and flushing");
-
-    let _ = shutdown_tx.send(true);
-    for task in scrape_tasks {
-        let _ = task.await;
+fn load_config(path: &std::path::Path) -> anyhow::Result<Arc<config::Config>> {
+    let config = config::load(path).with_context(|| format!("loading config {}", path.display()))?;
+    if config.remote_write.is_empty() {
+        anyhow::bail!("no remote_write endpoints configured; scraped data would be discarded");
     }
-    // All scrape loops are gone; dropping the last handle closes the queues
-    // so the senders flush pending batches and exit.
-    let dropped = remote_handle.total_dropped();
-    drop(remote_handle);
-    for task in sender_tasks {
-        let _ = task.await;
-    }
-    if dropped > 0 {
-        info!(dropped, "series dropped due to full remote-write queues");
+    info!(
+        config = %path.display(),
+        jobs = config.scrape_configs.len(),
+        remote_writes = config.remote_write.len(),
+        "configuration loaded"
+    );
+    Ok(Arc::new(config))
+}
+
+enum StopReason {
+    Shutdown,
+    Reload,
+}
+
+async fn run(args: &Args) -> anyhow::Result<()> {
+    let state = Arc::new(WebState::default());
+    let (lifecycle_tx, mut lifecycle_rx) = mpsc::channel::<LifecycleRequest>(4);
+    let (_addr, _web_task) = web::serve(
+        &args.web_listen_address,
+        Arc::clone(&state),
+        args.web_enable_lifecycle.then_some(lifecycle_tx),
+    )
+    .await?;
+
+    let mut sigterm = signal(SignalKind::terminate()).context("installing SIGTERM handler")?;
+    let mut sighup = signal(SignalKind::hangup()).context("installing SIGHUP handler")?;
+
+    let mut config = load_config(&args.config_file)?;
+    loop {
+        let (remote_handle, sender_tasks) =
+            remote_write::spawn(&config.remote_write).context("starting remote-write senders")?;
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let scrape_tasks = scrape::spawn_jobs(&config, &remote_handle, &shutdown_rx);
+        drop(shutdown_rx);
+        state.ready.store(true, Ordering::Relaxed);
+
+        let reason = wait_for_stop(
+            args,
+            &mut config,
+            &mut lifecycle_rx,
+            &mut sigterm,
+            &mut sighup,
+        )
+        .await;
+
+        if matches!(reason, StopReason::Shutdown) {
+            state.ready.store(false, Ordering::Relaxed);
+        }
+        let _ = shutdown_tx.send(true);
+        for task in scrape_tasks {
+            let _ = task.await;
+        }
+        // All scrape loops are gone; dropping the last handle closes the
+        // queues so the senders flush pending batches and exit.
+        let dropped = remote_handle.total_dropped();
+        drop(remote_handle);
+        for task in sender_tasks {
+            let _ = task.await;
+        }
+        if dropped > 0 {
+            info!(dropped, "series dropped due to full remote-write queues");
+        }
+
+        match reason {
+            StopReason::Shutdown => break,
+            StopReason::Reload => info!("restarting scrape pipeline with reloaded configuration"),
+        }
     }
     info!("shutdown complete");
     Ok(())
+}
+
+/// Wait for a signal or lifecycle request; on reload, the new configuration
+/// is validated first — a broken config keeps the current one running,
+/// matching Prometheus.
+async fn wait_for_stop(
+    args: &Args,
+    config: &mut Arc<config::Config>,
+    lifecycle_rx: &mut mpsc::Receiver<LifecycleRequest>,
+    sigterm: &mut tokio::signal::unix::Signal,
+    sighup: &mut tokio::signal::unix::Signal,
+) -> StopReason {
+    loop {
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(err) = result {
+                    error!(%err, "SIGINT handler failed; shutting down");
+                }
+                info!("SIGINT received; stopping scrapes and flushing");
+                return StopReason::Shutdown;
+            }
+            _ = sigterm.recv() => {
+                info!("SIGTERM received; stopping scrapes and flushing");
+                return StopReason::Shutdown;
+            }
+            _ = sighup.recv() => {
+                info!("SIGHUP received; reloading configuration");
+                match load_config(&args.config_file) {
+                    Ok(new_config) => {
+                        *config = new_config;
+                        return StopReason::Reload;
+                    }
+                    Err(err) => error!(%err, "config reload failed; keeping current configuration"),
+                }
+            }
+            request = lifecycle_rx.recv() => {
+                let Some(request) = request else { continue };
+                match request.command {
+                    LifecycleCommand::Quit => {
+                        info!("termination requested via /-/quit");
+                        let _ = request.respond.send(Ok(()));
+                        return StopReason::Shutdown;
+                    }
+                    LifecycleCommand::Reload => match load_config(&args.config_file) {
+                        Ok(new_config) => {
+                            info!("configuration reloaded via /-/reload");
+                            *config = new_config;
+                            let _ = request.respond.send(Ok(()));
+                            return StopReason::Reload;
+                        }
+                        Err(err) => {
+                            error!(%err, "config reload failed; keeping current configuration");
+                            let _ = request.respond.send(Err(format!("{err:#}")));
+                        }
+                    },
+                }
+            }
+        }
+    }
 }
