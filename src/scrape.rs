@@ -327,6 +327,10 @@ async fn scrape_loop(
             }
         }
         let outcome = scrape_once(&target, &client, &credentials).await;
+        crate::telemetry::METRICS.scrapes_total.inc();
+        if outcome.error.is_some() {
+            crate::telemetry::METRICS.scrape_failures_total.inc();
+        }
         match (&last_error, &outcome.error) {
             (None, Some(message)) => {
                 failures = 1;
@@ -355,6 +359,9 @@ async fn scrape_loop(
 
         let mut batch = outcome.series;
         let markers = tracker.advance(&batch, outcome.start_ms);
+        crate::telemetry::METRICS
+            .staleness_markers_total
+            .add(markers.len() as u64);
         batch.extend(markers);
         if report_series.is_empty() {
             report_series = outcome.report.iter().map(|s| s.labels.clone()).collect();
@@ -376,6 +383,8 @@ async fn scrape_loop(
 struct SeriesTracker {
     entries: HashMap<u64, TrackedSeries>,
     generation: u32,
+    /// Last size reported into the global `tracked_series` gauge.
+    tracked_reported: u64,
 }
 
 struct TrackedSeries {
@@ -417,15 +426,35 @@ impl SeriesTracker {
             .map(|entry| stale_series(unpack_labels(&entry.packed), start_ms))
             .collect();
         self.entries.retain(|_, entry| entry.generation == generation);
+        let now = self.entries.len() as u64;
+        if now >= self.tracked_reported {
+            crate::telemetry::METRICS
+                .tracked_series
+                .add(now - self.tracked_reported);
+        } else {
+            crate::telemetry::METRICS
+                .tracked_series
+                .sub(self.tracked_reported - now);
+        }
+        self.tracked_reported = now;
         markers
     }
 
     /// Emit markers for everything currently tracked (target removal).
     fn drain_all(&mut self, timestamp: i64) -> Vec<TimeSeries> {
-        self.entries
+        crate::telemetry::METRICS
+            .tracked_series
+            .sub(self.tracked_reported);
+        self.tracked_reported = 0;
+        let markers: Vec<TimeSeries> = self
+            .entries
             .drain()
             .map(|(_, entry)| stale_series(unpack_labels(&entry.packed), timestamp))
-            .collect()
+            .collect();
+        crate::telemetry::METRICS
+            .staleness_markers_total
+            .add(markers.len() as u64);
+        markers
     }
 }
 
@@ -494,6 +523,9 @@ async fn scrape_once(
         Ok(body) => match crate::parser::parse(&body, start_ms, target.honor_timestamps) {
             Ok(series) => {
                 scraped = series.len();
+                crate::telemetry::METRICS
+                    .samples_scraped_total
+                    .add(scraped as u64);
                 if target.sample_limit > 0 && scraped as u64 > target.sample_limit {
                     error = Some(format!(
                         "sample_limit exceeded ({scraped} > {}); scrape discarded",

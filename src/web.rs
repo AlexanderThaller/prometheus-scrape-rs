@@ -131,6 +131,7 @@ async fn route(
     lifecycle: Option<&mpsc::Sender<LifecycleRequest>>,
 ) -> (&'static str, String) {
     match (method, path) {
+        ("GET" | "HEAD", "/metrics") => ("200 OK", crate::telemetry::METRICS.render()),
         ("GET" | "HEAD", "/-/healthy") => ("200 OK", "Healthy.\n".to_owned()),
         ("GET" | "HEAD", "/-/ready") => {
             if state.ready.load(Ordering::Relaxed) {

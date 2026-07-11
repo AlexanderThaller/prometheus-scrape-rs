@@ -13,4 +13,5 @@ pub mod remote_write;
 pub mod scrape;
 pub mod sd;
 pub mod sd_k8s;
+pub mod telemetry;
 pub mod web;

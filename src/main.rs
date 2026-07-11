@@ -8,6 +8,9 @@ use tokio::signal::unix::{SignalKind, signal};
 use tokio::sync::mpsc;
 use tracing::{error, info, warn};
 
+use prometheus_scrape_rs::model::Label;
+use prometheus_scrape_rs::remote_write::RemoteWriteHandle;
+use prometheus_scrape_rs::telemetry::METRICS;
 use prometheus_scrape_rs::web::{LifecycleCommand, LifecycleRequest, WebState};
 use prometheus_scrape_rs::{config, remote_write, scrape, web};
 
@@ -98,6 +101,7 @@ fn main() -> anyhow::Result<()> {
     if args.pgo_training {
         return prometheus_scrape_rs::pgo::run_training_workload(args.pgo_corpus.as_deref());
     }
+    METRICS.mark_started();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::builder()
@@ -152,7 +156,11 @@ async fn run(args: &Args) -> anyhow::Result<()> {
             remote_write::spawn(&config.remote_write).context("starting remote-write senders")?;
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let scrape_tasks = scrape::spawn_jobs(&config, &remote_handle, &shutdown_rx);
-        drop(shutdown_rx);
+        let self_monitor = tokio::spawn(self_monitor_loop(
+            Arc::clone(&config),
+            remote_handle.clone(),
+            shutdown_rx,
+        ));
         state.ready.store(true, Ordering::Relaxed);
 
         let reason = wait_for_stop(
@@ -171,6 +179,7 @@ async fn run(args: &Args) -> anyhow::Result<()> {
         for task in scrape_tasks {
             let _ = task.await;
         }
+        let _ = self_monitor.await;
         // All scrape loops are gone; dropping the last handle closes the
         // queues so the senders flush pending batches and exit.
         let dropped = remote_handle.total_dropped();
@@ -189,6 +198,39 @@ async fn run(args: &Args) -> anyhow::Result<()> {
     }
     info!("shutdown complete");
     Ok(())
+}
+
+/// Push the agent's own metrics through the remote-write pipeline every
+/// scrape interval, labeled job="prometheus-scrape-rs" plus external
+/// labels — self-monitoring works without any discovery finding this pod.
+/// The same registry is also served on GET /metrics for normal scraping.
+async fn self_monitor_loop(
+    config: Arc<config::Config>,
+    remote_write: RemoteWriteHandle,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    let hostname = std::env::var("HOSTNAME").unwrap_or_else(|_| "localhost".to_owned());
+    let mut labels = vec![
+        Label::new("job", "prometheus-scrape-rs"),
+        Label::new("instance", hostname),
+    ];
+    for (name, value) in &config.global.external_labels {
+        if !labels.iter().any(|label| &label.name == name) {
+            labels.push(Label::new(name.clone(), value.clone()));
+        }
+    }
+    let mut ticker = tokio::time::interval(config.global.scrape_interval.as_duration());
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = shutdown.wait_for(|stop| *stop) => return,
+        }
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX));
+        remote_write.send(METRICS.series(&labels, timestamp));
+    }
 }
 
 /// Wait for a signal or lifecycle request; on reload, the new configuration

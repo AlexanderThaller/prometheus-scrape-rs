@@ -77,6 +77,9 @@ impl RemoteWriteHandle {
             ) = sender.try_send(payload)
             {
                 let count = payload.len() as u64;
+                crate::telemetry::METRICS
+                    .remote_write_dropped_series_total
+                    .add(count);
                 let total = self.dropped.fetch_add(count, Ordering::Relaxed) + count;
                 warn!(
                     endpoint = i,
@@ -273,6 +276,10 @@ impl Endpoint {
             attempt += 1;
             match self.send_once(compressed.clone()).await {
                 Ok(()) => {
+                    crate::telemetry::METRICS.remote_write_batches_total.inc();
+                    crate::telemetry::METRICS
+                        .remote_write_sent_bytes_total
+                        .add(compressed.len() as u64);
                     debug!(
                         endpoint = self.name,
                         series = series_count,
@@ -282,6 +289,9 @@ impl Endpoint {
                     return;
                 }
                 Err(SendError::Unrecoverable(message)) => {
+                    crate::telemetry::METRICS
+                        .remote_write_failed_batches_total
+                        .inc();
                     error!(
                         endpoint = self.name,
                         series = series_count,
@@ -291,6 +301,7 @@ impl Endpoint {
                     return;
                 }
                 Err(SendError::Recoverable(message)) => {
+                    crate::telemetry::METRICS.remote_write_retries_total.inc();
                     warn!(
                         endpoint = self.name,
                         attempt,
