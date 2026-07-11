@@ -2,7 +2,6 @@
 //! one jittered scrape loop per target.
 
 use std::{
-    collections::HashMap,
     hash::Hasher as _,
     sync::Arc,
     time::{
@@ -319,7 +318,7 @@ async fn scrape_loop(
             _ = removed.wait_for(|gone| *gone) => {
                 // Target left the target set: everything it wrote ends now.
                 let timestamp = now_ms();
-                let mut markers = tracker.drain_all(timestamp);
+                let mut markers = tracker.drain_all(&target, timestamp);
                 markers.extend(report_series.drain(..).map(|labels| stale_series(labels, timestamp)));
                 debug!(url = target.url, series = markers.len(), "target removed; staleness markers sent");
                 remote_write.send(markers);
@@ -358,7 +357,7 @@ async fn scrape_loop(
         last_error = outcome.error;
 
         let mut batch = outcome.series;
-        let markers = tracker.advance(&batch, outcome.start_ms);
+        let markers = tracker.advance(&target, &batch, outcome.retained_body, outcome.start_ms);
         crate::telemetry::METRICS
             .staleness_markers_total
             .add(markers.len() as u64);
@@ -371,62 +370,128 @@ async fn scrape_loop(
     }
 }
 
-/// Staleness tracking state for one target.
+/// Staleness tracking state for one target, vmagent-style.
 ///
-/// Memory-conscious by design — targets can expose hundreds of thousands of
-/// series: each label set is stored exactly once as a single packed string,
-/// keyed by its FNV-1a hash so steady-state scrapes neither clone labels
-/// nor allocate at all, only bump a generation counter. A u64 hash
-/// collision (odds ~1e-9 at 300k series) costs at most one wrong or
-/// missing staleness marker, never wrong sample data.
+/// Instead of one stored label set per active series (~500B each at 300k
+/// series), retain the previous scrape's raw body — one allocation with no
+/// per-series overhead — plus a sorted vector of series hashes (8 bytes per
+/// series). When series vanish (pod churn, an exporter dropping a series,
+/// a failed scrape), their label sets are re-derived by re-parsing the
+/// retained body through the same deterministic pipeline that produced
+/// them. Steady state costs hashing plus a sorted diff per scrape; the
+/// re-parse runs only on vanish events. A u64 hash collision (odds ~1e-9
+/// at 300k series) costs at most one wrong or missing marker, never wrong
+/// sample data.
 #[derive(Default)]
 struct SeriesTracker {
-    entries: HashMap<u64, TrackedSeries>,
-    generation: u32,
+    /// Raw body and scrape timestamp of the last emitted scrape.
+    retained: Option<RetainedScrape>,
+    /// Sorted hashes of the scrape-timestamped series last emitted.
+    hashes: Vec<u64>,
     /// Last size reported into the global `tracked_series` gauge.
     tracked_reported: u64,
 }
 
-struct TrackedSeries {
-    packed: Box<str>,
-    generation: u32,
+struct RetainedScrape {
+    body: String,
+    start_ms: i64,
 }
 
-/// Separators for the packed label representation; both are invalid in
-/// label names and cannot collide with UTF-8 label values containing them
-/// ambiguously since names never contain them.
-const LABEL_KV_SEPARATOR: char = '\u{1f}';
-const LABEL_RECORD_SEPARATOR: char = '\u{1e}';
-
 impl SeriesTracker {
-    /// Advance by one scrape: remember the label sets of `batch` (only
-    /// series carrying the scrape timestamp — explicitly timestamped samples
+    /// Advance by one scrape: remember which series `batch` emitted (only
+    /// those carrying the scrape timestamp — explicitly timestamped samples
     /// are exempt from staleness, like in Prometheus) and return one marker
-    /// for every series that was present before but is gone now. After a
-    /// failed scrape (`batch` empty) that is everything.
-    fn advance(&mut self, batch: &[TimeSeries], start_ms: i64) -> Vec<TimeSeries> {
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
-        for series in batch {
-            if series.samples.first().map(|s| s.timestamp) != Some(start_ms) {
+    /// for every series present before but gone now. After a failed scrape
+    /// (`batch` empty) that is everything.
+    fn advance(
+        &mut self,
+        target: &Target,
+        batch: &[TimeSeries],
+        retained_body: Option<String>,
+        start_ms: i64,
+    ) -> Vec<TimeSeries> {
+        let mut current: Vec<u64> = batch
+            .iter()
+            .filter(|series| series.samples.first().map(|s| s.timestamp) == Some(start_ms))
+            .map(|series| hash_labels(&series.labels))
+            .collect();
+        current.sort_unstable();
+        current.dedup();
+
+        let vanished: Vec<u64> = self
+            .hashes
+            .iter()
+            .copied()
+            .filter(|hash| current.binary_search(hash).is_err())
+            .collect();
+        let markers = self.rederive_markers(target, &vanished, start_ms);
+
+        self.hashes = current;
+        self.retained = retained_body.map(|body| RetainedScrape { body, start_ms });
+        self.update_gauge();
+        markers
+    }
+
+    /// Emit markers for everything currently tracked (target removal).
+    fn drain_all(&mut self, target: &Target, timestamp: i64) -> Vec<TimeSeries> {
+        let vanished = std::mem::take(&mut self.hashes);
+        let markers = self.rederive_markers(target, &vanished, timestamp);
+        crate::telemetry::METRICS
+            .staleness_markers_total
+            .add(markers.len() as u64);
+        self.retained = None;
+        self.update_gauge();
+        markers
+    }
+
+    /// Re-parse the retained body and rebuild the final label sets of the
+    /// `vanished` hashes (must be sorted). The pipeline is deterministic,
+    /// so re-derived label sets are identical to what was originally sent.
+    fn rederive_markers(
+        &self,
+        target: &Target,
+        vanished: &[u64],
+        timestamp: i64,
+    ) -> Vec<TimeSeries> {
+        if vanished.is_empty() {
+            return Vec::new();
+        }
+        let Some(retained) = &self.retained else {
+            return Vec::new();
+        };
+        let Ok(series) =
+            crate::parser::parse(&retained.body, retained.start_ms, target.honor_timestamps)
+        else {
+            // The body parsed when it was scraped; failing here would be a
+            // parser determinism bug.
+            warn!(
+                url = target.url,
+                "retained scrape body failed to re-parse; staleness markers skipped"
+            );
+            return Vec::new();
+        };
+        let mut consumed = vec![false; vanished.len()];
+        let mut markers = Vec::with_capacity(vanished.len());
+        for mut single in series {
+            if single.samples.first().map(|s| s.timestamp) != Some(retained.start_ms) {
                 continue;
             }
-            self.entries
-                .entry(hash_labels(&series.labels))
-                .and_modify(|entry| entry.generation = generation)
-                .or_insert_with(|| TrackedSeries {
-                    packed: pack_labels(&series.labels).into_boxed_str(),
-                    generation,
-                });
+            let Some(labels) = finalize_series_labels(std::mem::take(&mut single.labels), target)
+            else {
+                continue;
+            };
+            if let Ok(index) = vanished.binary_search(&hash_labels(&labels))
+                && !consumed[index]
+            {
+                consumed[index] = true;
+                markers.push(stale_series(labels, timestamp));
+            }
         }
-        let markers = self
-            .entries
-            .values()
-            .filter(|entry| entry.generation != generation)
-            .map(|entry| stale_series(unpack_labels(&entry.packed), start_ms))
-            .collect();
-        self.entries.retain(|_, entry| entry.generation == generation);
-        let now = self.entries.len() as u64;
+        markers
+    }
+
+    fn update_gauge(&mut self) {
+        let now = self.hashes.len() as u64;
         if now >= self.tracked_reported {
             crate::telemetry::METRICS
                 .tracked_series
@@ -437,50 +502,7 @@ impl SeriesTracker {
                 .sub(self.tracked_reported - now);
         }
         self.tracked_reported = now;
-        markers
     }
-
-    /// Emit markers for everything currently tracked (target removal).
-    fn drain_all(&mut self, timestamp: i64) -> Vec<TimeSeries> {
-        crate::telemetry::METRICS
-            .tracked_series
-            .sub(self.tracked_reported);
-        self.tracked_reported = 0;
-        let markers: Vec<TimeSeries> = self
-            .entries
-            .drain()
-            .map(|(_, entry)| stale_series(unpack_labels(&entry.packed), timestamp))
-            .collect();
-        crate::telemetry::METRICS
-            .staleness_markers_total
-            .add(markers.len() as u64);
-        markers
-    }
-}
-
-fn pack_labels(labels: &[Label]) -> String {
-    let capacity = labels
-        .iter()
-        .map(|l| l.name.len() + l.value.len() + 2)
-        .sum();
-    let mut packed = String::with_capacity(capacity);
-    for label in labels {
-        packed.push_str(&label.name);
-        packed.push(LABEL_KV_SEPARATOR);
-        packed.push_str(&label.value);
-        packed.push(LABEL_RECORD_SEPARATOR);
-    }
-    packed
-}
-
-fn unpack_labels(packed: &str) -> Vec<Label> {
-    packed
-        .split_terminator(LABEL_RECORD_SEPARATOR)
-        .filter_map(|record| {
-            let (name, value) = record.split_once(LABEL_KV_SEPARATOR)?;
-            Some(Label::new(name, value))
-        })
-        .collect()
 }
 
 /// A single-sample series carrying the staleness marker.
@@ -499,6 +521,9 @@ fn stale_series(labels: Vec<Label>, timestamp: i64) -> TimeSeries {
 struct ScrapeOutcome {
     series: Vec<TimeSeries>,
     report: Vec<TimeSeries>,
+    /// Raw exposition body, present only when `series` was actually
+    /// emitted — staleness tracking must reflect what was sent.
+    retained_body: Option<String>,
     start_ms: i64,
     error: Option<String>,
 }
@@ -517,6 +542,7 @@ async fn scrape_once(
     let mut scraped = 0usize;
     let mut kept = 0usize;
     let mut error = None;
+    let mut retained_body = None;
     let mut batch: Vec<TimeSeries> = Vec::new();
 
     match result {
@@ -535,24 +561,16 @@ async fn scrape_once(
                     up = 1.0;
                     batch.reserve(series.len() + 5);
                     for mut single in series {
-                        let labels = merge_target_labels(
-                            std::mem::take(&mut single.labels),
-                            &target.labels,
-                            target.honor_labels,
-                        );
-                        let Some(mut labels) =
-                            relabel::process(labels, &target.metric_relabel_configs)
+                        let Some(labels) =
+                            finalize_series_labels(std::mem::take(&mut single.labels), target)
                         else {
                             continue;
                         };
-                        for external in target.external_labels.iter() {
-                            add_if_absent(&mut labels, &external.name, &external.value);
-                        }
-                        sort_labels(&mut labels);
                         single.labels = labels;
                         batch.push(single);
                     }
                     kept = batch.len();
+                    retained_body = Some(body);
                 }
             }
             Err(err) => {
@@ -593,6 +611,7 @@ async fn scrape_once(
     ScrapeOutcome {
         series: batch,
         report,
+        retained_body,
         start_ms,
         error,
     }
@@ -623,6 +642,19 @@ async fn fetch(
         anyhow::bail!("server returned HTTP {status}");
     }
     Ok(response.text().await?)
+}
+
+/// The deterministic series-building pipeline: merge target labels, apply
+/// metric relabeling, attach external labels, sort. Shared by live scrapes
+/// and staleness re-derivation, which must reproduce identical label sets.
+fn finalize_series_labels(raw: Vec<Label>, target: &Target) -> Option<Vec<Label>> {
+    let labels = merge_target_labels(raw, &target.labels, target.honor_labels);
+    let mut labels = relabel::process(labels, &target.metric_relabel_configs)?;
+    for external in target.external_labels.iter() {
+        add_if_absent(&mut labels, &external.name, &external.value);
+    }
+    sort_labels(&mut labels);
+    Some(labels)
 }
 
 /// Attach target labels to a scraped series.
@@ -775,72 +807,119 @@ mod tests {
         assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
     }
 
-    fn one_sample_series(pairs: &[(&str, &str)], timestamp: i64) -> TimeSeries {
-        TimeSeries {
-            labels: label_vec(pairs),
-            samples: vec![Sample {
-                value: 1.0,
-                timestamp,
-            }],
+    /// Minimal target for tracker tests: no relabeling, one external label.
+    fn test_target() -> Target {
+        Target {
+            url: "http://t:1/metrics".to_owned(),
+            params: Vec::new(),
+            labels: label_vec(&[("instance", "t:1"), ("job", "test")]),
+            interval: Duration::from_secs(1),
+            timeout: Duration::from_secs(1),
+            honor_labels: false,
+            honor_timestamps: true,
+            sample_limit: 0,
+            metric_relabel_configs: Vec::new(),
+            external_labels: Arc::new([Label::new("origin", "tracker-test")]),
         }
+    }
+
+    /// Reproduce the live pipeline for a raw body: parse + finalize labels.
+    fn simulate_scrape(target: &Target, body: &str, start_ms: i64) -> Vec<TimeSeries> {
+        let parsed =
+            crate::parser::parse(body, start_ms, target.honor_timestamps).expect("body parses");
+        parsed
+            .into_iter()
+            .filter_map(|mut single| {
+                let labels =
+                    finalize_series_labels(std::mem::take(&mut single.labels), target)?;
+                single.labels = labels;
+                Some(single)
+            })
+            .collect()
     }
 
     #[test]
     fn staleness_markers_for_vanished_series() {
+        let target = test_target();
         let mut tracker = SeriesTracker::default();
-        let ts1 = 1_000;
-        let scrape1 = vec![
-            one_sample_series(&[(METRIC_NAME_LABEL, "a"), ("case", "x")], ts1),
-            one_sample_series(&[(METRIC_NAME_LABEL, "b")], ts1),
-            // explicit exposition timestamp: exempt from staleness tracking
-            one_sample_series(&[(METRIC_NAME_LABEL, "explicit")], 500),
-        ];
-        assert!(tracker.advance(&scrape1, ts1).is_empty());
-        assert_eq!(tracker.entries.len(), 2);
 
-        // "b" vanishes in the next scrape.
+        // First scrape: metric_a, metric_b, and one explicitly timestamped
+        // series (exempt from staleness tracking).
+        let body1 = "metric_a{case=\"x\"} 1\nmetric_b 2\nexplicit 3 500\n";
+        let ts1 = 1_000;
+        let batch1 = simulate_scrape(&target, body1, ts1);
+        assert!(
+            tracker
+                .advance(&target, &batch1, Some(body1.to_owned()), ts1)
+                .is_empty()
+        );
+        assert_eq!(tracker.hashes.len(), 2);
+
+        // metric_b vanishes: its marker is re-derived from the retained
+        // body with the full final label set (target + external labels).
+        let body2 = "metric_a{case=\"x\"} 1\nexplicit 3 500\n";
         let ts2 = 2_000;
-        let scrape2 = vec![one_sample_series(
-            &[(METRIC_NAME_LABEL, "a"), ("case", "x")],
-            ts2,
-        )];
-        let markers = tracker.advance(&scrape2, ts2);
+        let batch2 = simulate_scrape(&target, body2, ts2);
+        let markers = tracker.advance(&target, &batch2, Some(body2.to_owned()), ts2);
         assert_eq!(markers.len(), 1);
-        assert_eq!(markers[0].labels, label_vec(&[(METRIC_NAME_LABEL, "b")]));
+        assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_b");
+        assert_eq!(get_label(&markers[0].labels, "job"), "test");
+        assert_eq!(get_label(&markers[0].labels, "origin"), "tracker-test");
+        assert!(
+            markers[0].labels.windows(2).all(|w| w[0].name < w[1].name),
+            "marker labels must be sorted"
+        );
         assert!(crate::model::is_stale_nan(markers[0].samples[0].value));
         assert_eq!(markers[0].samples[0].timestamp, ts2);
 
-        // Failed scrape (empty batch): everything left goes stale, label
-        // order intact after the pack/unpack roundtrip.
+        // Failed scrape (nothing emitted, no body): everything left goes
+        // stale, re-derived from the retained body of scrape 2.
         let ts3 = 3_000;
-        let markers = tracker.advance(&[], ts3);
+        let markers = tracker.advance(&target, &[], None, ts3);
         assert_eq!(markers.len(), 1);
-        assert_eq!(
-            markers[0].labels,
-            label_vec(&[(METRIC_NAME_LABEL, "a"), ("case", "x")])
-        );
-        assert!(tracker.entries.is_empty());
+        assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_a");
+        assert_eq!(get_label(&markers[0].labels, "case"), "x");
+        assert!(tracker.hashes.is_empty());
+        assert!(tracker.retained.is_none());
 
         // Recovery: series returns, no markers.
         let ts4 = 4_000;
-        let scrape4 = vec![one_sample_series(&[(METRIC_NAME_LABEL, "a")], ts4)];
-        assert!(tracker.advance(&scrape4, ts4).is_empty());
+        let batch4 = simulate_scrape(&target, body2, ts4);
+        assert!(
+            tracker
+                .advance(&target, &batch4, Some(body2.to_owned()), ts4)
+                .is_empty()
+        );
 
-        // Target removal drains everything.
-        let markers = tracker.drain_all(5_000);
+        // Target removal drains everything tracked.
+        let markers = tracker.drain_all(&target, 5_000);
         assert_eq!(markers.len(), 1);
-        assert!(tracker.entries.is_empty());
+        assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_a");
+        assert!(tracker.hashes.is_empty());
+        assert!(tracker.retained.is_none());
     }
 
     #[test]
-    fn labels_roundtrip_through_packing() {
-        let labels = label_vec(&[
-            (METRIC_NAME_LABEL, "metric"),
-            ("empty", ""),
-            ("unicode", "wert-äöü"),
-        ]);
-        assert_eq!(unpack_labels(&pack_labels(&labels)), labels);
-        assert!(unpack_labels("").is_empty());
+    fn staleness_rederivation_respects_metric_relabeling() {
+        // Series dropped by metric relabeling never entered the sent batch;
+        // re-derivation applies the same rules, so they get no markers.
+        let mut target = test_target();
+        target.metric_relabel_configs = serde_saphyr::from_str(
+            "- source_labels: [__name__]\n  regex: \"kept_.*\"\n  action: keep\n",
+        )
+        .expect("valid config");
+        let mut tracker = SeriesTracker::default();
+
+        let body1 = "kept_a 1\ndropped_b 2\n";
+        let batch1 = simulate_scrape(&target, body1, 1_000);
+        assert_eq!(batch1.len(), 1);
+        tracker.advance(&target, &batch1, Some(body1.to_owned()), 1_000);
+        assert_eq!(tracker.hashes.len(), 1);
+
+        // Everything vanishes; only kept_a may produce a marker.
+        let markers = tracker.advance(&target, &[], None, 2_000);
+        assert_eq!(markers.len(), 1);
+        assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "kept_a");
     }
 
     #[test]
