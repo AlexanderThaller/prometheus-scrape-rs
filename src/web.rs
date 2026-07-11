@@ -202,6 +202,7 @@ mod tests {
     }
 
     async fn request(addr: SocketAddr, method: &str, path: &str) -> (u16, String) {
+        crate::auth::ensure_crypto_provider();
         let client = reqwest::Client::new();
         let url = format!("http://{addr}{path}");
         let response = match method {

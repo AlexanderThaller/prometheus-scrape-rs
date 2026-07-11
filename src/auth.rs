@@ -13,8 +13,18 @@ use crate::config::{
     TlsConfig,
 };
 
+/// Install ring as the process-wide rustls crypto provider (idempotent).
+///
+/// reqwest is built without a baked-in provider (`rustls-no-provider`) so
+/// the whole process — reqwest and kube alike — uses exactly one crypto
+/// stack: ring, which builds cleanly for static musl targets.
+pub fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
 /// Build an HTTP client honoring the given TLS settings.
 pub fn build_client(timeout: Duration, tls: &TlsConfig) -> anyhow::Result<reqwest::Client> {
+    ensure_crypto_provider();
     let mut builder = reqwest::Client::builder()
         .timeout(timeout)
         .user_agent(concat!("prometheus-scrape-rs/", env!("CARGO_PKG_VERSION")))
