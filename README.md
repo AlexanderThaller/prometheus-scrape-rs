@@ -102,7 +102,6 @@ ships for Prometheus itself.
 
 - No WAL: samples buffered in memory only; a long remote-storage outage
   drops data that Prometheus agent would have kept on disk.
-- No staleness markers when a target disappears or a series vanishes.
 - Service discovery: `static_configs`, `file_sd_configs` and
   `kubernetes_sd_configs` (`pod`/`endpointslice` roles); other roles and
   SD mechanisms are rejected at startup.
