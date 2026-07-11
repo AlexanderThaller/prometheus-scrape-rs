@@ -47,6 +47,12 @@ lto = true
 codegen-units = 1
 panic = "abort"
 
+# deploy + debug symbols + frame pointers, for profiling only
+[profile.profiling]
+inherits = "deploy"
+debug = true
+panic = "unwind"
+
 [dev-dependencies]
 criterion = "0.8"
 

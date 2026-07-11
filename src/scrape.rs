@@ -634,6 +634,7 @@ fn merge_target_labels(
     target_labels: &[Label],
     honor_labels: bool,
 ) -> Vec<Label> {
+    labels.reserve(target_labels.len());
     for target_label in target_labels {
         if honor_labels {
             add_if_absent(&mut labels, &target_label.name, &target_label.value);

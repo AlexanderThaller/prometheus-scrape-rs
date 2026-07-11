@@ -209,23 +209,7 @@ fn apply(set: &mut LabelSet, config: &RelabelConfig, val: &mut String) -> bool {
     let re = &config.regex.regex;
     match config.action {
         Action::Replace => {
-            let joined = set.join(&config.source_labels, &config.separator, val);
-            // No match leaves the label set untouched.
-            let Some(caps) = re.captures(joined) else {
-                return true;
-            };
-            let mut target = String::new();
-            caps.expand(&config.target_label, &mut target);
-            if !is_valid_label_name(&target) {
-                return true;
-            }
-            let mut replacement = String::new();
-            caps.expand(&config.replacement, &mut replacement);
-            if replacement.is_empty() {
-                set.remove(&target);
-            } else {
-                set.set(&target, replacement);
-            }
+            apply_replace(set, config, val);
         }
         Action::Keep => {
             let joined = set.join(&config.source_labels, &config.separator, val);
@@ -290,6 +274,58 @@ fn apply(set: &mut LabelSet, config: &RelabelConfig, val: &mut String) -> bool {
     true
 }
 
+/// The `replace` action, split out of [`apply`] for readability.
+fn apply_replace(set: &mut LabelSet, config: &RelabelConfig, val: &mut String) {
+    let joined = set.join(&config.source_labels, &config.separator, val);
+    // Fast path for the ubiquitous `source -> target_label` copy rule:
+    // the default regex `(.*)` always matches (and captures the whole
+    // value) unless the value contains a newline, and simple
+    // replacements need no capture expansion. Operator-generated
+    // configs consist almost entirely of such rules; this skips the
+    // regex engine and its per-call captures allocation.
+    if config.regex.source == "(.*)" && !config.target_label.contains('$') {
+        if joined.contains('\n') {
+            // `.` does not match newlines: the anchored default regex
+            // would not match, leaving the label set untouched.
+            return;
+        }
+        let value = if config.replacement == "$1" || config.replacement == "${1}" {
+            Some(joined.to_owned())
+        } else if !config.replacement.contains('$') {
+            Some(config.replacement.clone())
+        } else {
+            None // exotic replacement: general path below
+        };
+        if let Some(value) = value {
+            if !is_valid_label_name(&config.target_label) {
+                return;
+            }
+            if value.is_empty() {
+                set.remove(&config.target_label);
+            } else {
+                set.set(&config.target_label, value);
+            }
+            return;
+        }
+    }
+    // No match leaves the label set untouched.
+    let Some(caps) = config.regex.regex.captures(joined) else {
+        return;
+    };
+    let mut target = String::new();
+    caps.expand(&config.target_label, &mut target);
+    if !is_valid_label_name(&target) {
+        return;
+    }
+    let mut replacement = String::new();
+    caps.expand(&config.replacement, &mut replacement);
+    if replacement.is_empty() {
+        set.remove(&target);
+    } else {
+        set.set(&target, replacement);
+    }
+}
+
 /// MD5-hash `val` and reduce it modulo `modulus`, matching Prometheus:
 /// `binary.BigEndian.Uint64(md5.Sum(val)[8:]) % modulus`.
 fn hash_mod(val: &str, modulus: u64) -> u64 {
@@ -351,6 +387,40 @@ mod tests {
         got.sort_by(|a, b| a.name.cmp(&b.name));
         want.sort_by(|a, b| a.name.cmp(&b.name));
         assert_eq!(got, want);
+    }
+
+    #[test]
+    fn fast_path_matches_general_path_semantics() {
+        // default regex, $1 replacement: copies joined value
+        let mut copy = config(Action::Replace);
+        copy.source_labels = vec!["a".to_owned()];
+        copy.target_label = "copy".to_owned();
+        let out = process(labels(&[("a", "v1")]), std::slice::from_ref(&copy)).expect("kept");
+        assert_eq!(get(&out, "copy"), Some("v1"));
+
+        // default regex, literal replacement
+        let mut lit = copy.clone();
+        lit.target_label = "lit".to_owned();
+        lit.replacement = "fixed".to_owned();
+        let out = process(labels(&[("a", "v1")]), std::slice::from_ref(&lit)).expect("kept");
+        assert_eq!(get(&out, "lit"), Some("fixed"));
+
+        // newline in value: default anchored regex does not match -> unchanged
+        let out =
+            process(labels(&[("a", "v\n1")]), std::slice::from_ref(&copy)).expect("kept");
+        assert_eq!(get(&out, "copy"), None);
+
+        // empty joined value deletes the target label (matches general path)
+        let mut wipe = config(Action::Replace);
+        wipe.source_labels = vec!["missing".to_owned()];
+        wipe.target_label = "gone".to_owned();
+        let out = process(
+            labels(&[("gone", "was-here"), ("keep", "x")]),
+            std::slice::from_ref(&wipe),
+        )
+        .expect("kept");
+        assert_eq!(get(&out, "gone"), None);
+        assert_eq!(get(&out, "keep"), Some("x"));
     }
 
     #[test]

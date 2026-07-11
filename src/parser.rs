@@ -97,7 +97,7 @@ pub fn parse(
         }
 
         if let Some(series) = parse_line(
-            bytes,
+            body,
             line_start,
             end,
             line_no,
@@ -141,13 +141,14 @@ fn is_name_continue(b: u8, allow_colon: bool) -> bool {
 /// `start..end` is the line content excluding the newline and trailing `\r`.
 /// Returns `Ok(None)` for blank and comment lines.
 fn parse_line(
-    bytes: &[u8],
+    body: &str,
     start: usize,
     end: usize,
     line_no: usize,
     default_timestamp_ms: i64,
     honor_timestamps: bool,
 ) -> Result<Option<TimeSeries>, ParseError> {
+    let bytes = body.as_bytes();
     let mut i = start;
 
     // Skip leading whitespace.
@@ -178,10 +179,13 @@ fn parse_line(
         i += 1;
     }
     // Metric name is ASCII by construction, so this slice is valid UTF-8.
-    let metric_name = str_from(bytes, name_start, i);
+    let metric_name = str_from(body, name_start, i);
 
     // Reserve label slots: name + however many appear.
-    let mut labels: Vec<Label> = Vec::with_capacity(4);
+    // Headroom beyond typical exposition label counts: the scrape pipeline
+    // appends job/instance/external labels and relabeling may add more —
+    // sizing for that here avoids one realloc per series downstream.
+    let mut labels: Vec<Label> = Vec::with_capacity(12);
     labels.push(Label::new(METRIC_NAME_LABEL, metric_name));
 
     // Optional whitespace between name and '{' or value. Prometheus is strict
@@ -192,7 +196,7 @@ fn parse_line(
 
     // --- optional label set ---
     if i < end && bytes[i] == b'{' {
-        i = parse_labels(bytes, i, end, line_no, &mut labels)?;
+        i = parse_labels(body, i, end, line_no, &mut labels)?;
         // Optional whitespace before value.
         while i < end && is_space(bytes[i]) {
             i += 1;
@@ -207,7 +211,7 @@ fn parse_line(
     while i < end && !is_space(bytes[i]) {
         i += 1;
     }
-    let value_tok = str_from(bytes, value_start, i);
+    let value_tok = str_from(body, value_start, i);
     let value = parse_value(value_tok)
         .ok_or_else(|| ParseError::new(line_no, format!("invalid value: {value_tok:?}")))?;
 
@@ -224,7 +228,7 @@ fn parse_line(
         while i < end && !is_space(bytes[i]) {
             i += 1;
         }
-        let ts_tok = str_from(bytes, ts_start, i);
+        let ts_tok = str_from(body, ts_start, i);
         let parsed = parse_timestamp(ts_tok)
             .ok_or_else(|| ParseError::new(line_no, format!("invalid timestamp: {ts_tok:?}")))?;
         if honor_timestamps {
@@ -245,7 +249,7 @@ fn parse_line(
         } else {
             return Err(ParseError::new(
                 line_no,
-                format!("unexpected trailing content: {:?}", str_from(bytes, i, end)),
+                format!("unexpected trailing content: {:?}", str_from(body, i, end)),
             ));
         }
     }
@@ -263,12 +267,13 @@ fn parse_line(
 /// Parse the label set starting at `bytes[open]` (which must be `{`). Returns
 /// the index just past the closing `}`.
 fn parse_labels(
-    bytes: &[u8],
+    body: &str,
     open: usize,
     end: usize,
     line_no: usize,
     labels: &mut Vec<Label>,
 ) -> Result<usize, ParseError> {
+    let bytes = body.as_bytes();
     debug_assert_eq!(bytes[open], b'{');
     let mut i = open + 1;
 
@@ -300,7 +305,7 @@ fn parse_labels(
         while i < end && is_name_continue(bytes[i], false) {
             i += 1;
         }
-        let name = str_from(bytes, name_start, i);
+        let name = str_from(body, name_start, i);
 
         if name == METRIC_NAME_LABEL {
             return Err(ParseError::new(
@@ -338,7 +343,7 @@ fn parse_labels(
         }
 
         // --- label value (double-quoted) ---
-        let (value, next) = parse_label_value(bytes, i, end, line_no)?;
+        let (value, next) = parse_label_value(body, i, end, line_no)?;
         i = next;
 
         labels.push(Label::new(name, value));
@@ -379,11 +384,12 @@ fn parse_labels(
 /// as UTF-8 and copied once. Slow path (backslash present) decodes escapes
 /// char by char.
 fn parse_label_value(
-    bytes: &[u8],
+    body: &str,
     open: usize,
     end: usize,
     line_no: usize,
 ) -> Result<(String, usize), ParseError> {
+    let bytes = body.as_bytes();
     debug_assert_eq!(bytes[open], b'"');
     let content_start = open + 1;
     let mut i = content_start;
@@ -418,7 +424,7 @@ fn parse_label_value(
     let close = i;
 
     if !has_escape {
-        let s = utf8_from(bytes, content_start, close, line_no)?;
+        let s = utf8_from(body, content_start, close, line_no)?;
         return Ok((s.to_owned(), close + 1));
     }
 
@@ -451,7 +457,7 @@ fn parse_label_value(
                 j += 1;
             }
             // The run is a slice of the original body; validate it as UTF-8.
-            let run = utf8_from(raw, run_start, j, line_no)?;
+            let run = utf8_from(body, content_start + run_start, content_start + j, line_no)?;
             decoded.push_str(run);
         }
     }
@@ -516,19 +522,19 @@ fn parse_timestamp(tok: &str) -> Option<i64> {
 
 /// Slice `bytes[start..end]` as `&str`, assuming ASCII/known-valid content
 /// (metric names, numeric tokens). Callers guarantee validity.
-fn str_from(bytes: &[u8], start: usize, end: usize) -> &str {
-    // These slices come from name/number scans that only accept ASCII bytes,
-    // or from error-message paths. Fall back to a lossy view is not possible
-    // without allocation, so use from_utf8 and treat failure as empty — but in
-    // practice callers only pass ASCII here.
-    core::str::from_utf8(&bytes[start..end]).unwrap_or("")
+fn str_from(body: &str, start: usize, end: usize) -> &str {
+    // The body is &str, so slices are valid UTF-8 by construction; the
+    // O(1) boundary check replaces a full validation scan. Callers pass
+    // offsets delimited by ASCII bytes, which are always char boundaries.
+    body.get(start..end).unwrap_or("")
 }
 
 /// Slice `bytes[start..end]` as `&str`, returning a parse error on invalid
 /// UTF-8. Used for label values, which may contain arbitrary UTF-8.
-fn utf8_from(bytes: &[u8], start: usize, end: usize, line_no: usize) -> Result<&str, ParseError> {
-    core::str::from_utf8(&bytes[start..end])
-        .map_err(|_| ParseError::new(line_no, "invalid UTF-8 in label value"))
+fn utf8_from(body: &str, start: usize, end: usize, line_no: usize) -> Result<&str, ParseError> {
+    // O(1) boundary check; the body is already valid UTF-8.
+    body.get(start..end)
+        .ok_or_else(|| ParseError::new(line_no, "invalid UTF-8 boundary in label value"))
 }
 
 #[cfg(test)]
