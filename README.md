@@ -100,6 +100,19 @@ ships for Prometheus itself.
   SD mechanisms are rejected at startup.
 - No client TLS certificates (`cert_file`/`key_file`) yet.
 
+## Container image
+
+```sh
+docker build -f Containerfile -t prometheus-scrape-rs .
+```
+
+Multi-stage build: `rust:1-alpine` compiles a fully static musl binary
+(mimalloc allocator, ring-only TLS — no aws-lc/cmake involved) with the
+LTO `deploy` profile; the runtime stage is `FROM scratch` containing only
+the binary and a CA bundle, running as UID 65534. Resulting image is
+~6 MB. Kubernetes probes are served on `:9090` (see the web endpoint
+section); no shell, no UI, no writable filesystem needed.
+
 ## Development
 
 ```sh
