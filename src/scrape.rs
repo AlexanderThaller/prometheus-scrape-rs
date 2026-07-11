@@ -307,10 +307,10 @@ async fn scrape_loop(
     // goes down (and one when it recovers), not one per interval.
     let mut last_error: Option<String> = None;
     let mut failures = 0u64;
-    // Label sets written by the previous scrape, for staleness markers.
-    // Series carrying explicit exposition timestamps are excluded, matching
+    // Series written by the previous scrape, for staleness markers. Series
+    // carrying explicit exposition timestamps are excluded, matching
     // Prometheus (staleness only applies to scrape-timestamped samples).
-    let mut previous_series: HashMap<u64, Vec<Label>> = HashMap::new();
+    let mut tracker = SeriesTracker::default();
     let mut report_series: Vec<Vec<Label>> = Vec::new();
     loop {
         tokio::select! {
@@ -319,10 +319,7 @@ async fn scrape_loop(
             _ = removed.wait_for(|gone| *gone) => {
                 // Target left the target set: everything it wrote ends now.
                 let timestamp = now_ms();
-                let mut markers: Vec<TimeSeries> = previous_series
-                    .drain()
-                    .map(|(_, labels)| stale_series(labels, timestamp))
-                    .collect();
+                let mut markers = tracker.drain_all(timestamp);
                 markers.extend(report_series.drain(..).map(|labels| stale_series(labels, timestamp)));
                 debug!(url = target.url, series = markers.len(), "target removed; staleness markers sent");
                 remote_write.send(markers);
@@ -357,39 +354,104 @@ async fn scrape_loop(
         last_error = outcome.error;
 
         let mut batch = outcome.series;
-        let markers = staleness_markers(&mut previous_series, &batch, outcome.start_ms);
+        let markers = tracker.advance(&batch, outcome.start_ms);
         batch.extend(markers);
-        report_series = outcome.report.iter().map(|s| s.labels.clone()).collect();
+        if report_series.is_empty() {
+            report_series = outcome.report.iter().map(|s| s.labels.clone()).collect();
+        }
         batch.extend(outcome.report);
         remote_write.send(batch);
     }
 }
 
-/// Advance the staleness tracking state by one scrape.
+/// Staleness tracking state for one target.
 ///
-/// `previous` is replaced with the label sets of `batch` (only series that
-/// carry the scrape timestamp — explicitly timestamped samples are exempt
-/// from staleness, like in Prometheus). Returns one marker series for every
-/// label set that was present before but is gone now; after a failed scrape
-/// (`batch` empty) that is everything.
-fn staleness_markers(
-    previous: &mut HashMap<u64, Vec<Label>>,
-    batch: &[TimeSeries],
-    start_ms: i64,
-) -> Vec<TimeSeries> {
-    let mut current: HashMap<u64, Vec<Label>> = HashMap::with_capacity(batch.len());
-    for series in batch {
-        if series.samples.first().map(|s| s.timestamp) == Some(start_ms) {
-            current.insert(hash_labels(&series.labels), series.labels.clone());
+/// Memory-conscious by design — targets can expose hundreds of thousands of
+/// series: each label set is stored exactly once as a single packed string,
+/// keyed by its FNV-1a hash so steady-state scrapes neither clone labels
+/// nor allocate at all, only bump a generation counter. A u64 hash
+/// collision (odds ~1e-9 at 300k series) costs at most one wrong or
+/// missing staleness marker, never wrong sample data.
+#[derive(Default)]
+struct SeriesTracker {
+    entries: HashMap<u64, TrackedSeries>,
+    generation: u32,
+}
+
+struct TrackedSeries {
+    packed: Box<str>,
+    generation: u32,
+}
+
+/// Separators for the packed label representation; both are invalid in
+/// label names and cannot collide with UTF-8 label values containing them
+/// ambiguously since names never contain them.
+const LABEL_KV_SEPARATOR: char = '\u{1f}';
+const LABEL_RECORD_SEPARATOR: char = '\u{1e}';
+
+impl SeriesTracker {
+    /// Advance by one scrape: remember the label sets of `batch` (only
+    /// series carrying the scrape timestamp — explicitly timestamped samples
+    /// are exempt from staleness, like in Prometheus) and return one marker
+    /// for every series that was present before but is gone now. After a
+    /// failed scrape (`batch` empty) that is everything.
+    fn advance(&mut self, batch: &[TimeSeries], start_ms: i64) -> Vec<TimeSeries> {
+        self.generation = self.generation.wrapping_add(1);
+        let generation = self.generation;
+        for series in batch {
+            if series.samples.first().map(|s| s.timestamp) != Some(start_ms) {
+                continue;
+            }
+            self.entries
+                .entry(hash_labels(&series.labels))
+                .and_modify(|entry| entry.generation = generation)
+                .or_insert_with(|| TrackedSeries {
+                    packed: pack_labels(&series.labels).into_boxed_str(),
+                    generation,
+                });
         }
+        let markers = self
+            .entries
+            .values()
+            .filter(|entry| entry.generation != generation)
+            .map(|entry| stale_series(unpack_labels(&entry.packed), start_ms))
+            .collect();
+        self.entries.retain(|_, entry| entry.generation == generation);
+        markers
     }
-    let markers = previous
-        .drain()
-        .filter(|(hash, _)| !current.contains_key(hash))
-        .map(|(_, labels)| stale_series(labels, start_ms))
-        .collect();
-    *previous = current;
-    markers
+
+    /// Emit markers for everything currently tracked (target removal).
+    fn drain_all(&mut self, timestamp: i64) -> Vec<TimeSeries> {
+        self.entries
+            .drain()
+            .map(|(_, entry)| stale_series(unpack_labels(&entry.packed), timestamp))
+            .collect()
+    }
+}
+
+fn pack_labels(labels: &[Label]) -> String {
+    let capacity = labels
+        .iter()
+        .map(|l| l.name.len() + l.value.len() + 2)
+        .sum();
+    let mut packed = String::with_capacity(capacity);
+    for label in labels {
+        packed.push_str(&label.name);
+        packed.push(LABEL_KV_SEPARATOR);
+        packed.push_str(&label.value);
+        packed.push(LABEL_RECORD_SEPARATOR);
+    }
+    packed
+}
+
+fn unpack_labels(packed: &str) -> Vec<Label> {
+    packed
+        .split_terminator(LABEL_RECORD_SEPARATOR)
+        .filter_map(|record| {
+            let (name, value) = record.split_once(LABEL_KV_SEPARATOR)?;
+            Some(Label::new(name, value))
+        })
+        .collect()
 }
 
 /// A single-sample series carrying the staleness marker.
@@ -692,37 +754,60 @@ mod tests {
 
     #[test]
     fn staleness_markers_for_vanished_series() {
-        let mut previous = HashMap::new();
+        let mut tracker = SeriesTracker::default();
         let ts1 = 1_000;
         let scrape1 = vec![
-            one_sample_series(&[(METRIC_NAME_LABEL, "a")], ts1),
+            one_sample_series(&[(METRIC_NAME_LABEL, "a"), ("case", "x")], ts1),
             one_sample_series(&[(METRIC_NAME_LABEL, "b")], ts1),
             // explicit exposition timestamp: exempt from staleness tracking
             one_sample_series(&[(METRIC_NAME_LABEL, "explicit")], 500),
         ];
-        assert!(staleness_markers(&mut previous, &scrape1, ts1).is_empty());
-        assert_eq!(previous.len(), 2);
+        assert!(tracker.advance(&scrape1, ts1).is_empty());
+        assert_eq!(tracker.entries.len(), 2);
 
         // "b" vanishes in the next scrape.
         let ts2 = 2_000;
-        let scrape2 = vec![one_sample_series(&[(METRIC_NAME_LABEL, "a")], ts2)];
-        let markers = staleness_markers(&mut previous, &scrape2, ts2);
+        let scrape2 = vec![one_sample_series(
+            &[(METRIC_NAME_LABEL, "a"), ("case", "x")],
+            ts2,
+        )];
+        let markers = tracker.advance(&scrape2, ts2);
         assert_eq!(markers.len(), 1);
         assert_eq!(markers[0].labels, label_vec(&[(METRIC_NAME_LABEL, "b")]));
         assert!(crate::model::is_stale_nan(markers[0].samples[0].value));
         assert_eq!(markers[0].samples[0].timestamp, ts2);
 
-        // Failed scrape (empty batch): everything left goes stale.
+        // Failed scrape (empty batch): everything left goes stale, label
+        // order intact after the pack/unpack roundtrip.
         let ts3 = 3_000;
-        let markers = staleness_markers(&mut previous, &[], ts3);
+        let markers = tracker.advance(&[], ts3);
         assert_eq!(markers.len(), 1);
-        assert_eq!(markers[0].labels, label_vec(&[(METRIC_NAME_LABEL, "a")]));
-        assert!(previous.is_empty());
+        assert_eq!(
+            markers[0].labels,
+            label_vec(&[(METRIC_NAME_LABEL, "a"), ("case", "x")])
+        );
+        assert!(tracker.entries.is_empty());
 
         // Recovery: series returns, no markers.
         let ts4 = 4_000;
         let scrape4 = vec![one_sample_series(&[(METRIC_NAME_LABEL, "a")], ts4)];
-        assert!(staleness_markers(&mut previous, &scrape4, ts4).is_empty());
+        assert!(tracker.advance(&scrape4, ts4).is_empty());
+
+        // Target removal drains everything.
+        let markers = tracker.drain_all(5_000);
+        assert_eq!(markers.len(), 1);
+        assert!(tracker.entries.is_empty());
+    }
+
+    #[test]
+    fn labels_roundtrip_through_packing() {
+        let labels = label_vec(&[
+            (METRIC_NAME_LABEL, "metric"),
+            ("empty", ""),
+            ("unicode", "wert-äöü"),
+        ]);
+        assert_eq!(unpack_labels(&pack_labels(&labels)), labels);
+        assert!(unpack_labels("").is_empty());
     }
 
     #[test]
