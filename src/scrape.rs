@@ -505,6 +505,18 @@ impl SeriesTracker {
     }
 }
 
+/// Every exit path — target removal, config reload, shutdown, panic — must
+/// return this tracker's contribution to the global gauge, or reloads leak
+/// it upward (observed: gauge at 564k with 306k live series after reloads).
+impl Drop for SeriesTracker {
+    fn drop(&mut self) {
+        crate::telemetry::METRICS
+            .tracked_series
+            .sub(self.tracked_reported);
+        self.tracked_reported = 0;
+    }
+}
+
 /// A single-sample series carrying the staleness marker.
 fn stale_series(labels: Vec<Label>, timestamp: i64) -> TimeSeries {
     TimeSeries {
