@@ -8,6 +8,21 @@
 /// Reserved label name carrying the metric name.
 pub const METRIC_NAME_LABEL: &str = "__name__";
 
+/// Prometheus staleness marker: a NaN with this exact bit pattern tells the
+/// receiver "this series ended here" instead of applying query lookback.
+/// Must be compared/constructed via bits — `==` on NaN is always false.
+pub const STALE_NAN_BITS: u64 = 0x7ff0_0000_0000_0002;
+
+#[must_use]
+pub const fn stale_nan() -> f64 {
+    f64::from_bits(STALE_NAN_BITS)
+}
+
+#[must_use]
+pub const fn is_stale_nan(value: f64) -> bool {
+    value.to_bits() == STALE_NAN_BITS
+}
+
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, prost::Message)]
 pub struct Label {
     #[prost(string, tag = "1")]

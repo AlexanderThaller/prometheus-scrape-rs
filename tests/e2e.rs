@@ -31,14 +31,22 @@ test_metric{case=\"e2e\"} 42
 
 /// Minimal single-request HTTP server: answer one GET with `body`.
 fn serve_scrapes(listener: &TcpListener) {
+    serve_scrape_sequence(listener, &[SCRAPE_BODY]);
+}
+
+/// Serve `bodies[n]` for the n-th request; the last body repeats forever.
+fn serve_scrape_sequence(listener: &TcpListener, bodies: &[&str]) {
+    let mut served = 0usize;
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         let mut buf = [0u8; 4096];
         let _ = stream.read(&mut buf);
+        let body = bodies[served.min(bodies.len() - 1)];
+        served += 1;
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: text/plain; version=0.0.4\r\ncontent-length: \
-             {}\r\nconnection: close\r\n\r\n{SCRAPE_BODY}",
-            SCRAPE_BODY.len()
+             {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
         );
         let _ = stream.write_all(response.as_bytes());
     }
@@ -170,5 +178,89 @@ remote_write:
     }
     assert!(found_metric, "test_metric not found in WriteRequest");
     assert!(found_up, "up series not found in WriteRequest");
+    Ok(())
+}
+
+#[test]
+fn vanished_series_gets_staleness_marker() -> anyhow::Result<()> {
+    let exporter = TcpListener::bind("127.0.0.1:0")?;
+    let exporter_addr = exporter.local_addr()?;
+    std::thread::spawn(move || {
+        serve_scrape_sequence(
+            &exporter,
+            &[
+                "steady 1\nvanishing 2\n",
+                "steady 1\n", // "vanishing" is gone from the second scrape on
+            ],
+        );
+    });
+
+    let receiver = TcpListener::bind("127.0.0.1:0")?;
+    let receiver_addr = receiver.local_addr()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || serve_remote_write(&receiver, &tx));
+
+    let config_yaml = format!(
+        r#"
+global:
+  scrape_interval: 1s
+scrape_configs:
+  - job_name: staleness
+    static_configs:
+      - targets: ["{exporter_addr}"]
+remote_write:
+  - url: http://{receiver_addr}/api/v1/write
+    queue_config:
+      batch_send_deadline: 200ms
+"#
+    );
+    let dir = std::env::temp_dir().join(format!("prom-scrape-stale-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let config_path = dir.join("prometheus.yml");
+    std::fs::write(&config_path, config_yaml)?;
+    let config = Arc::new(config::load(&config_path)?);
+    std::fs::remove_dir_all(&dir).ok();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let marker = runtime.block_on(async move {
+        let (handle, _senders) = remote_write::spawn(&config.remote_write)?;
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let _jobs = scrape::spawn_jobs(&config, &handle, &shutdown_rx);
+        tokio::task::spawn_blocking(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(20);
+            while std::time::Instant::now() < deadline {
+                let Ok(request) = rx.recv_timeout(Duration::from_secs(5)) else {
+                    continue;
+                };
+                for series in request.timeseries {
+                    let name = series
+                        .labels
+                        .iter()
+                        .find(|l| l.name == "__name__")
+                        .map_or("", |l| l.value.as_str());
+                    if name == "vanishing"
+                        && series
+                            .samples
+                            .iter()
+                            .any(|s| prometheus_scrape_rs::model::is_stale_nan(s.value))
+                    {
+                        return Some(series);
+                    }
+                }
+            }
+            None
+        })
+        .await
+        .map_err(anyhow::Error::from)
+    })?;
+
+    let marker = marker.ok_or_else(|| anyhow::anyhow!("no staleness marker within 20s"))?;
+    assert!(
+        marker.labels.iter().any(|l| l.name == "job" && l.value == "staleness"),
+        "marker must carry target labels: {:?}",
+        marker.labels
+    );
     Ok(())
 }

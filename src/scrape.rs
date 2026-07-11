@@ -2,6 +2,8 @@
 //! one jittered scrape loop per target.
 
 use std::{
+    collections::HashMap,
+    hash::Hasher as _,
     sync::Arc,
     time::{
         Duration,
@@ -107,30 +109,49 @@ async fn run_job(
     };
 
     let (mut groups_rx, _sd_tasks) = crate::sd::watch(&job);
-    let mut target_tasks: Vec<JoinHandle<()>> = Vec::new();
+    // Running scrape loops keyed by target identity. On discovery change,
+    // only removed targets are stopped (they emit staleness markers) and
+    // only new ones started; unchanged targets keep their series intact.
+    let mut running: std::collections::HashMap<u64, RunningTarget> =
+        std::collections::HashMap::new();
     loop {
         let groups = groups_rx.borrow_and_update().clone();
-        for task in target_tasks.drain(..) {
-            task.abort();
-        }
         let targets = build_targets(&job, &global, &groups, &external_labels);
-        info!(
-            job = job.job_name,
-            targets = targets.len(),
-            "scrape targets updated"
-        );
-        target_tasks = targets
+        let desired: std::collections::HashMap<u64, Target> = targets
             .into_iter()
-            .map(|target| {
-                tokio::spawn(scrape_loop(
+            .map(|target| (target.identity(), target))
+            .collect();
+
+        let removed: Vec<u64> = running
+            .keys()
+            .filter(|key| !desired.contains_key(key))
+            .copied()
+            .collect();
+        for key in removed {
+            if let Some(target) = running.remove(&key) {
+                let _ = target.removed_tx.send(true);
+                let _ = target.handle.await;
+            }
+        }
+        for (key, target) in desired {
+            running.entry(key).or_insert_with(|| {
+                let (removed_tx, removed_rx) = watch::channel(false);
+                let handle = tokio::spawn(scrape_loop(
                     Arc::new(target),
                     client.clone(),
                     Arc::clone(&credentials),
                     remote_write.clone(),
                     shutdown.clone(),
-                ))
-            })
-            .collect();
+                    removed_rx,
+                ));
+                RunningTarget { removed_tx, handle }
+            });
+        }
+        info!(
+            job = job.job_name,
+            targets = running.len(),
+            "scrape targets updated"
+        );
 
         let discovery_closed = tokio::select! {
             changed = groups_rx.changed() => changed.is_err(),
@@ -142,9 +163,19 @@ async fn run_job(
             break;
         }
     }
-    for task in target_tasks {
-        task.abort();
+    // Process shutdown: loops exit via the shutdown signal WITHOUT staleness
+    // markers — a replacement instance continues these series and markers
+    // would punch holes into them during rollouts.
+    for (_, target) in running {
+        let _ = target.handle.await;
     }
+}
+
+struct RunningTarget {
+    /// Signals "this target left the target set": the loop emits staleness
+    /// markers for everything it wrote, then exits.
+    removed_tx: watch::Sender<bool>,
+    handle: JoinHandle<()>,
 }
 
 /// A fully resolved scrape target.
@@ -161,6 +192,21 @@ struct Target {
     sample_limit: u64,
     metric_relabel_configs: Vec<RelabelConfig>,
     external_labels: Arc<[Label]>,
+}
+
+impl Target {
+    /// Stable identity across discovery updates: URL, params and final
+    /// label set. Targets with equal identity are the same series source.
+    fn identity(&self) -> u64 {
+        let mut hasher = FnvHasher::default();
+        hasher.write(self.url.as_bytes());
+        for (name, value) in &self.params {
+            hasher.write(name.as_bytes());
+            hasher.write(value.as_bytes());
+        }
+        hash_labels_into(&mut hasher, &self.labels);
+        hasher.finish()
+    }
 }
 
 /// Prometheus `populateLabels`: seed target labels, run target relabeling,
@@ -243,6 +289,7 @@ async fn scrape_loop(
     credentials: Arc<Credentials>,
     remote_write: RemoteWriteHandle,
     mut shutdown: watch::Receiver<bool>,
+    mut removed: watch::Receiver<bool>,
 ) {
     // Deterministic per-target offset spreads scrapes over the interval,
     // like Prometheus' scrapeloop offset.
@@ -260,13 +307,30 @@ async fn scrape_loop(
     // goes down (and one when it recovers), not one per interval.
     let mut last_error: Option<String> = None;
     let mut failures = 0u64;
+    // Label sets written by the previous scrape, for staleness markers.
+    // Series carrying explicit exposition timestamps are excluded, matching
+    // Prometheus (staleness only applies to scrape-timestamped samples).
+    let mut previous_series: HashMap<u64, Vec<Label>> = HashMap::new();
+    let mut report_series: Vec<Vec<Label>> = Vec::new();
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
             _ = shutdown.wait_for(|stop| *stop) => return,
+            _ = removed.wait_for(|gone| *gone) => {
+                // Target left the target set: everything it wrote ends now.
+                let timestamp = now_ms();
+                let mut markers: Vec<TimeSeries> = previous_series
+                    .drain()
+                    .map(|(_, labels)| stale_series(labels, timestamp))
+                    .collect();
+                markers.extend(report_series.drain(..).map(|labels| stale_series(labels, timestamp)));
+                debug!(url = target.url, series = markers.len(), "target removed; staleness markers sent");
+                remote_write.send(markers);
+                return;
+            }
         }
-        let (batch, error) = scrape_once(&target, &client, &credentials).await;
-        match (&last_error, &error) {
+        let outcome = scrape_once(&target, &client, &credentials).await;
+        match (&last_error, &outcome.error) {
             (None, Some(message)) => {
                 failures = 1;
                 warn!(url = target.url, error = message, "target scrape failing");
@@ -290,18 +354,69 @@ async fn scrape_loop(
             }
             (None, None) => {}
         }
-        last_error = error;
+        last_error = outcome.error;
+
+        let mut batch = outcome.series;
+        let markers = staleness_markers(&mut previous_series, &batch, outcome.start_ms);
+        batch.extend(markers);
+        report_series = outcome.report.iter().map(|s| s.labels.clone()).collect();
+        batch.extend(outcome.report);
         remote_write.send(batch);
     }
 }
 
-/// Perform one scrape. Returns the batch to forward (always including the
-/// synthetic report series) and the failure reason, if the scrape failed.
+/// Advance the staleness tracking state by one scrape.
+///
+/// `previous` is replaced with the label sets of `batch` (only series that
+/// carry the scrape timestamp — explicitly timestamped samples are exempt
+/// from staleness, like in Prometheus). Returns one marker series for every
+/// label set that was present before but is gone now; after a failed scrape
+/// (`batch` empty) that is everything.
+fn staleness_markers(
+    previous: &mut HashMap<u64, Vec<Label>>,
+    batch: &[TimeSeries],
+    start_ms: i64,
+) -> Vec<TimeSeries> {
+    let mut current: HashMap<u64, Vec<Label>> = HashMap::with_capacity(batch.len());
+    for series in batch {
+        if series.samples.first().map(|s| s.timestamp) == Some(start_ms) {
+            current.insert(hash_labels(&series.labels), series.labels.clone());
+        }
+    }
+    let markers = previous
+        .drain()
+        .filter(|(hash, _)| !current.contains_key(hash))
+        .map(|(_, labels)| stale_series(labels, start_ms))
+        .collect();
+    *previous = current;
+    markers
+}
+
+/// A single-sample series carrying the staleness marker.
+fn stale_series(labels: Vec<Label>, timestamp: i64) -> TimeSeries {
+    TimeSeries {
+        labels,
+        samples: vec![Sample {
+            value: crate::model::stale_nan(),
+            timestamp,
+        }],
+    }
+}
+
+/// One scrape's output, kept apart so staleness tracking can tell scraped
+/// data from the synthetic report series.
+struct ScrapeOutcome {
+    series: Vec<TimeSeries>,
+    report: Vec<TimeSeries>,
+    start_ms: i64,
+    error: Option<String>,
+}
+
 async fn scrape_once(
     target: &Target,
     client: &reqwest::Client,
     credentials: &Credentials,
-) -> (Vec<TimeSeries>, Option<String>) {
+) -> ScrapeOutcome {
     let start_ms = now_ms();
     let started = std::time::Instant::now();
     let result = fetch(target, client, credentials).await;
@@ -356,6 +471,7 @@ async fn scrape_once(
     }
 
     // Synthetic report series, always emitted (target labels + external).
+    let mut report: Vec<TimeSeries> = Vec::with_capacity(5);
     let mut report_labels = target.labels.clone();
     for external in target.external_labels.iter() {
         add_if_absent(&mut report_labels, &external.name, &external.value);
@@ -372,7 +488,7 @@ async fn scrape_once(
         labels.push(Label::new(METRIC_NAME_LABEL, name));
         labels.extend_from_slice(&report_labels);
         sort_labels(&mut labels);
-        batch.push(TimeSeries {
+        report.push(TimeSeries {
             labels,
             samples: vec![Sample {
                 value,
@@ -380,7 +496,12 @@ async fn scrape_once(
             }],
         });
     }
-    (batch, error)
+    ScrapeOutcome {
+        series: batch,
+        report,
+        start_ms,
+        error,
+    }
 }
 
 async fn fetch(
@@ -474,12 +595,53 @@ fn now_ms() -> i64 {
 }
 
 fn fnv1a(data: &[u8]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in data {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100_0000_01b3);
+    let mut hasher = FnvHasher::default();
+    hasher.write(data);
+    hasher.finish()
+}
+
+/// FNV-1a, 64 bit. Used for scrape offsets, target identities and series
+/// label-set hashes; not exposed on the wire.
+struct FnvHasher {
+    hash: u64,
+}
+
+impl Default for FnvHasher {
+    fn default() -> Self {
+        Self {
+            hash: 0xcbf2_9ce4_8422_2325,
+        }
     }
-    hash
+}
+
+impl std::hash::Hasher for FnvHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.hash ^= u64::from(*byte);
+            self.hash = self.hash.wrapping_mul(0x100_0000_01b3);
+        }
+    }
+
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+/// Hash a label set; a separator byte between fields keeps
+/// `("ab","c")` distinct from `("a","bc")`.
+fn hash_labels_into(hasher: &mut FnvHasher, labels: &[Label]) {
+    for label in labels {
+        hasher.write(label.name.as_bytes());
+        hasher.write(&[0xff]);
+        hasher.write(label.value.as_bytes());
+        hasher.write(&[0xfe]);
+    }
+}
+
+fn hash_labels(labels: &[Label]) -> u64 {
+    let mut hasher = FnvHasher::default();
+    hash_labels_into(&mut hasher, labels);
+    hasher.finish()
 }
 
 #[cfg(test)]
@@ -516,6 +678,72 @@ mod tests {
     fn fnv1a_matches_reference_vector() {
         // FNV-1a 64-bit of "a" is 0xaf63dc4c8601ec8c.
         assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
+    }
+
+    fn one_sample_series(pairs: &[(&str, &str)], timestamp: i64) -> TimeSeries {
+        TimeSeries {
+            labels: label_vec(pairs),
+            samples: vec![Sample {
+                value: 1.0,
+                timestamp,
+            }],
+        }
+    }
+
+    #[test]
+    fn staleness_markers_for_vanished_series() {
+        let mut previous = HashMap::new();
+        let ts1 = 1_000;
+        let scrape1 = vec![
+            one_sample_series(&[(METRIC_NAME_LABEL, "a")], ts1),
+            one_sample_series(&[(METRIC_NAME_LABEL, "b")], ts1),
+            // explicit exposition timestamp: exempt from staleness tracking
+            one_sample_series(&[(METRIC_NAME_LABEL, "explicit")], 500),
+        ];
+        assert!(staleness_markers(&mut previous, &scrape1, ts1).is_empty());
+        assert_eq!(previous.len(), 2);
+
+        // "b" vanishes in the next scrape.
+        let ts2 = 2_000;
+        let scrape2 = vec![one_sample_series(&[(METRIC_NAME_LABEL, "a")], ts2)];
+        let markers = staleness_markers(&mut previous, &scrape2, ts2);
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].labels, label_vec(&[(METRIC_NAME_LABEL, "b")]));
+        assert!(crate::model::is_stale_nan(markers[0].samples[0].value));
+        assert_eq!(markers[0].samples[0].timestamp, ts2);
+
+        // Failed scrape (empty batch): everything left goes stale.
+        let ts3 = 3_000;
+        let markers = staleness_markers(&mut previous, &[], ts3);
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].labels, label_vec(&[(METRIC_NAME_LABEL, "a")]));
+        assert!(previous.is_empty());
+
+        // Recovery: series returns, no markers.
+        let ts4 = 4_000;
+        let scrape4 = vec![one_sample_series(&[(METRIC_NAME_LABEL, "a")], ts4)];
+        assert!(staleness_markers(&mut previous, &scrape4, ts4).is_empty());
+    }
+
+    #[test]
+    fn stale_nan_survives_protobuf_roundtrip() {
+        use prost::Message as _;
+        let series = stale_series(label_vec(&[(METRIC_NAME_LABEL, "x")]), 1);
+        let encoded = series.encode_to_vec();
+        let decoded = TimeSeries::decode(encoded.as_slice()).expect("decode");
+        assert!(crate::model::is_stale_nan(decoded.samples[0].value));
+    }
+
+    #[test]
+    fn hash_labels_separates_field_boundaries() {
+        assert_ne!(
+            hash_labels(&label_vec(&[("ab", "c")])),
+            hash_labels(&label_vec(&[("a", "bc")]))
+        );
+        assert_eq!(
+            hash_labels(&label_vec(&[("a", "b")])),
+            hash_labels(&label_vec(&[("a", "b")]))
+        );
     }
 
     #[test]
