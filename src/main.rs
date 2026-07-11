@@ -56,6 +56,14 @@ struct Args {
     /// Accepted for Prometheus compatibility; only "/" is supported.
     #[arg(long = "web.route-prefix", hide = true, default_value = "/")]
     web_route_prefix: String,
+
+    /// Run the PGO training workload and exit (container build only).
+    #[arg(long = "pgo-training", hide = true)]
+    pgo_training: bool,
+
+    /// Directory of *.prom exposition bodies for PGO training.
+    #[arg(long = "pgo-corpus", hide = true)]
+    pgo_corpus: Option<PathBuf>,
 }
 
 impl Args {
@@ -87,6 +95,9 @@ impl Args {
 fn main() -> anyhow::Result<()> {
     prometheus_scrape_rs::auth::ensure_crypto_provider();
     let args = Args::parse();
+    if args.pgo_training {
+        return prometheus_scrape_rs::pgo::run_training_workload(args.pgo_corpus.as_deref());
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::builder()

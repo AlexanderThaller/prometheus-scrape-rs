@@ -6,6 +6,8 @@ pub mod auth;
 pub mod config;
 pub mod model;
 pub mod parser;
+#[doc(hidden)]
+pub mod pgo;
 pub mod relabel;
 pub mod remote_write;
 pub mod scrape;
