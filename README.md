@@ -89,6 +89,14 @@ ships for Prometheus itself.
   fills, new samples for it are dropped and counted.
 - **YAML** via [`serde_saphyr`](https://docs.rs/serde_saphyr) (`serde_yaml`
   is unmaintained).
+- **musl + mimalloc, deliberately**: musl's two real performance penalties
+  are its allocator under multithreaded load (solved by mimalloc; measured
+  within ~2% of glibc) and the static-build default of 2003-era x86-64
+  codegen without runtime SIMD dispatch (solved by pinning
+  `-C target-cpu=x86-64-v3` in the container build). ring's crypto is
+  libc-independent assembly and tokio threads use Rust-managed stacks, so
+  no residual musl penalty applies to this workload — a glibc base image
+  would buy nothing measurable and cost the scratch image.
 
 ## Known gaps vs. Prometheus agent mode
 

@@ -7,6 +7,10 @@
 
 FROM docker.io/library/rust:1-alpine AS builder
 RUN apk add --no-cache musl-dev build-base ca-certificates
+# Static musl builds default to the 2003 x86-64 baseline (no AVX2 anywhere,
+# including memcpy) — the actual root cause of most "musl is slow" reports.
+# All cluster nodes are x86-64-v3 capable (Zen 3 / Alder Lake).
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3"
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
