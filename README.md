@@ -120,6 +120,13 @@ the binary and a CA bundle, running as UID 65534. Resulting image is
 ~6 MB. Kubernetes probes are served on `:9090` (see the web endpoint
 section); no shell, no UI, no writable filesystem needed.
 
+The build is profile-guided: an instrumented binary runs a deterministic
+training workload (parse → relabel → encode → compress) and the final
+binary is rebuilt with the collected profile — measured 1.08x faster on
+the hot path. Drop real scrape bodies into `pgo-corpus/*.prom` (see
+[`pgo-corpus/README.md`](pgo-corpus/README.md)) to train on production
+data; without them a synthetic body is used.
+
 ## Development
 
 ```sh
