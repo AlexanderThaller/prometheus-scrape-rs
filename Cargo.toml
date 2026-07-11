@@ -15,7 +15,7 @@ md-5 = "0.11"
 mimalloc = "0.1"
 prost = "0.14"
 regex = "1"
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "gzip", "http2", "query"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "gzip", "http2", "query", "hickory-dns"] }
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "0.0.29"
 snap = "1"

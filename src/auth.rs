@@ -23,6 +23,10 @@ pub fn ensure_crypto_provider() {
 }
 
 /// Build an HTTP client honoring the given TLS settings.
+///
+/// DNS goes through hickory-resolver (pure Rust, async) instead of the
+/// libc `getaddrinfo` threadpool — reqwest enables it by default when the
+/// `hickory-dns` feature is on.
 pub fn build_client(timeout: Duration, tls: &TlsConfig) -> anyhow::Result<reqwest::Client> {
     ensure_crypto_provider();
     let mut builder = reqwest::Client::builder()
