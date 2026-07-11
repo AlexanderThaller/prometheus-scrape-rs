@@ -263,6 +263,10 @@ impl Endpoint {
         }
 
         let series_count = batch.len();
+        let sample_count: u64 = batch
+            .iter()
+            .map(|series| series.samples.len() as u64)
+            .sum();
         proto_buf.clear();
         let encode_result = match self.protocol {
             ProtobufMessage::WriteRequestV1 => {
@@ -286,7 +290,7 @@ impl Endpoint {
         let mut attempt = 0u32;
         loop {
             attempt += 1;
-            match self.send_once(compressed.clone()).await {
+            match self.send_once(compressed.clone(), sample_count).await {
                 Ok(()) => {
                     crate::telemetry::METRICS.remote_write_batches_total.inc();
                     crate::telemetry::METRICS
@@ -328,7 +332,7 @@ impl Endpoint {
         }
     }
 
-    async fn send_once(&self, body: Vec<u8>) -> Result<(), SendError> {
+    async fn send_once(&self, body: Vec<u8>, sample_count: u64) -> Result<(), SendError> {
         let (content_type, version) = match self.protocol {
             ProtobufMessage::WriteRequestV1 => ("application/x-protobuf", "0.1.0"),
             ProtobufMessage::WriteRequestV2 => (
@@ -354,6 +358,27 @@ impl Endpoint {
             .map_err(|err| SendError::Recoverable(err.to_string()))?;
         let status = response.status();
         if status.is_success() {
+            // Remote-write 2.0 receivers report what they actually wrote;
+            // a 2xx with fewer samples written than sent is a partial write
+            // that would otherwise be silent (the failure mode of
+            // grafana/mimir#12622/#13576).
+            if self.protocol == ProtobufMessage::WriteRequestV2 {
+                let written = response
+                    .headers()
+                    .get("X-Prometheus-Remote-Write-Samples-Written")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.parse::<u64>().ok());
+                if let Some(written) = written
+                    && written < sample_count
+                {
+                    warn!(
+                        endpoint = self.name,
+                        sent = sample_count,
+                        written,
+                        "receiver accepted the request but wrote fewer samples than sent"
+                    );
+                }
+            }
             return Ok(());
         }
         let detail = response.text().await.unwrap_or_default();
