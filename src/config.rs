@@ -27,10 +27,36 @@ use crate::relabel::RelabelConfig;
 pub fn load(path: &Path) -> anyhow::Result<Config> {
     let raw = std::fs::read_to_string(path)
         .map_err(|err| anyhow::anyhow!("reading config file {}: {err}", path.display()))?;
+    let raw = expand_env_vars(&raw);
     let config: Config = serde_saphyr::from_str(&raw)
         .map_err(|err| anyhow::anyhow!("parsing config file {}: {err}", path.display()))?;
     config.validate()?;
     Ok(config)
+}
+
+/// Expand `$(VAR)` references from the process environment.
+///
+/// prometheus-operator renders configs with `$(SHARD)` / `$(POD_NAME)`
+/// placeholders and relies on its config-reloader sidecar to substitute
+/// them. This agent runs without the sidecar, so it performs the same
+/// expansion itself. References to unset variables are left untouched (with
+/// a warning) so a stray `$(...)` in a regex cannot silently vanish.
+fn expand_env_vars(raw: &str) -> String {
+    #[expect(clippy::unwrap_used, reason = "static pattern is known valid")]
+    let pattern = regex::Regex::new(r"\$\(([A-Za-z_][A-Za-z0-9_]*)\)").unwrap();
+    pattern
+        .replace_all(raw, |caps: &regex::Captures<'_>| {
+            let name = &caps[1];
+            std::env::var(name).unwrap_or_else(|_| {
+                tracing::warn!(
+                    variable = name,
+                    "config references $({name}) but the environment variable is not set; \
+                     leaving it as-is"
+                );
+                caps[0].to_owned()
+            })
+        })
+        .into_owned()
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -609,6 +635,18 @@ global:
                 "error should mention agent mode: {err}"
             );
         }
+    }
+
+    #[test]
+    fn expands_env_var_references() {
+        // PATH is set in every test environment; unset and malformed
+        // references must survive untouched.
+        let path = std::env::var("PATH").expect("PATH is always set");
+        let raw = "a $(PATH) b $(DEFINITELY_UNSET_VAR_XYZ) $(1bad) $PATH ${PATH}";
+        assert_eq!(
+            expand_env_vars(raw),
+            format!("a {path} b $(DEFINITELY_UNSET_VAR_XYZ) $(1bad) $PATH ${{PATH}}")
+        );
     }
 
     #[test]
