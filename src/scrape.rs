@@ -256,21 +256,52 @@ async fn scrape_loop(
     let mut ticker = tokio::time::interval(target.interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     debug!(url = target.url, "scrape loop started");
+    // Log failures on state transitions only: one warning when a target
+    // goes down (and one when it recovers), not one per interval.
+    let mut last_error: Option<String> = None;
+    let mut failures = 0u64;
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
             _ = shutdown.wait_for(|stop| *stop) => return,
         }
-        let batch = scrape_once(&target, &client, &credentials).await;
+        let (batch, error) = scrape_once(&target, &client, &credentials).await;
+        match (&last_error, &error) {
+            (None, Some(message)) => {
+                failures = 1;
+                warn!(url = target.url, error = message, "target scrape failing");
+            }
+            (Some(previous), Some(message)) => {
+                failures += 1;
+                if previous == message {
+                    debug!(url = target.url, error = message, failures, "target still failing");
+                } else {
+                    warn!(
+                        url = target.url,
+                        error = message,
+                        failures,
+                        "target scrape still failing, error changed"
+                    );
+                }
+            }
+            (Some(_), None) => {
+                info!(url = target.url, failures, "target scrape recovered");
+                failures = 0;
+            }
+            (None, None) => {}
+        }
+        last_error = error;
         remote_write.send(batch);
     }
 }
 
+/// Perform one scrape. Returns the batch to forward (always including the
+/// synthetic report series) and the failure reason, if the scrape failed.
 async fn scrape_once(
     target: &Target,
     client: &reqwest::Client,
     credentials: &Credentials,
-) -> Vec<TimeSeries> {
+) -> (Vec<TimeSeries>, Option<String>) {
     let start_ms = now_ms();
     let started = std::time::Instant::now();
     let result = fetch(target, client, credentials).await;
@@ -279,6 +310,7 @@ async fn scrape_once(
     let mut up = 0.0;
     let mut scraped = 0usize;
     let mut kept = 0usize;
+    let mut error = None;
     let mut batch: Vec<TimeSeries> = Vec::new();
 
     match result {
@@ -286,12 +318,10 @@ async fn scrape_once(
             Ok(series) => {
                 scraped = series.len();
                 if target.sample_limit > 0 && scraped as u64 > target.sample_limit {
-                    warn!(
-                        url = target.url,
-                        scraped,
-                        limit = target.sample_limit,
-                        "sample_limit exceeded; scrape discarded"
-                    );
+                    error = Some(format!(
+                        "sample_limit exceeded ({scraped} > {}); scrape discarded",
+                        target.sample_limit
+                    ));
                 } else {
                     up = 1.0;
                     batch.reserve(series.len() + 5);
@@ -317,11 +347,11 @@ async fn scrape_once(
                 }
             }
             Err(err) => {
-                warn!(url = target.url, %err, "scrape body failed to parse");
+                error = Some(format!("scrape body failed to parse: {err}"));
             }
         },
         Err(err) => {
-            debug!(url = target.url, %err, "scrape failed");
+            error = Some(format!("{err:#}"));
         }
     }
 
@@ -350,7 +380,7 @@ async fn scrape_once(
             }],
         });
     }
-    batch
+    (batch, error)
 }
 
 async fn fetch(
