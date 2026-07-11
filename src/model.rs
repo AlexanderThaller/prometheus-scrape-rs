@@ -64,6 +64,31 @@ pub struct WriteRequest {
     pub timeseries: Vec<TimeSeries>,
 }
 
+/// Remote-write 2.0 request (`io.prometheus.write.v2.Request`).
+///
+/// Every label name and value is written once into `symbols`; series
+/// reference them by index — the protocol-level fix for per-series label
+/// duplication (measured 40-60% smaller payloads upstream). `symbols[0]`
+/// MUST be the empty string per spec. Histograms, exemplars and metadata
+/// are intentionally omitted (we forward samples only).
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct WriteRequestV2 {
+    #[prost(string, repeated, tag = "4")]
+    pub symbols: Vec<String>,
+    #[prost(message, repeated, tag = "5")]
+    pub timeseries: Vec<TimeSeriesV2>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+pub struct TimeSeriesV2 {
+    /// Pairs of symbol indices: even positions are label names, odd
+    /// positions the corresponding values.
+    #[prost(uint32, repeated, tag = "1")]
+    pub labels_refs: Vec<u32>,
+    #[prost(message, repeated, tag = "2")]
+    pub samples: Vec<Sample>,
+}
+
 /// Sort labels by name as required by the remote-write spec.
 pub fn sort_labels(labels: &mut [Label]) {
     labels.sort_unstable_by(|a, b| a.name.cmp(&b.name));

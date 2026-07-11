@@ -36,10 +36,15 @@ use tracing::{
 
 use crate::{
     auth::Credentials,
-    config::RemoteWriteConfig,
+    config::{
+        ProtobufMessage,
+        RemoteWriteConfig,
+    },
     model::{
         TimeSeries,
+        TimeSeriesV2,
         WriteRequest,
+        WriteRequestV2,
         sort_labels,
     },
     relabel::{
@@ -132,6 +137,7 @@ fn queue_slots(config: &RemoteWriteConfig) -> usize {
 struct Endpoint {
     name: String,
     url: String,
+    protocol: ProtobufMessage,
     client: reqwest::Client,
     credentials: Credentials,
     extra_headers: Vec<(String, String)>,
@@ -179,6 +185,7 @@ impl Endpoint {
         Ok(Self {
             name,
             url: config.url.clone(),
+            protocol: config.protobuf_message,
             client,
             credentials,
             extra_headers,
@@ -256,10 +263,15 @@ impl Endpoint {
         }
 
         let series_count = batch.len();
-        let request = WriteRequest { timeseries: batch };
         proto_buf.clear();
-        if let Err(err) = request.encode(proto_buf) {
-            error!(endpoint = self.name, %err, "encoding WriteRequest failed; dropping batch");
+        let encode_result = match self.protocol {
+            ProtobufMessage::WriteRequestV1 => {
+                WriteRequest { timeseries: batch }.encode(proto_buf)
+            }
+            ProtobufMessage::WriteRequestV2 => encode_v2(batch).encode(proto_buf),
+        };
+        if let Err(err) = encode_result {
+            error!(endpoint = self.name, %err, "encoding write request failed; dropping batch");
             return;
         }
         let compressed = match encoder.compress_vec(proto_buf) {
@@ -317,12 +329,19 @@ impl Endpoint {
     }
 
     async fn send_once(&self, body: Vec<u8>) -> Result<(), SendError> {
+        let (content_type, version) = match self.protocol {
+            ProtobufMessage::WriteRequestV1 => ("application/x-protobuf", "0.1.0"),
+            ProtobufMessage::WriteRequestV2 => (
+                "application/x-protobuf;proto=io.prometheus.write.v2.Request",
+                "2.0.0",
+            ),
+        };
         let mut builder = self
             .client
             .post(&self.url)
-            .header(reqwest::header::CONTENT_TYPE, "application/x-protobuf")
+            .header(reqwest::header::CONTENT_TYPE, content_type)
             .header(reqwest::header::CONTENT_ENCODING, "snappy")
-            .header("X-Prometheus-Remote-Write-Version", "0.1.0")
+            .header("X-Prometheus-Remote-Write-Version", version)
             .body(body);
         for (key, value) in &self.extra_headers {
             builder = builder.header(key, value);
@@ -350,6 +369,47 @@ impl Endpoint {
 enum SendError {
     Recoverable(String),
     Unrecoverable(String),
+}
+
+/// Convert a 1.0 batch to a 2.0 request: every distinct label name and
+/// value is written once into the symbols table and series carry pairs of
+/// symbol indices. Copies are bounded by unique strings per request, not by
+/// series count — the protocol-level cure for label duplication.
+fn encode_v2(batch: Vec<TimeSeries>) -> WriteRequestV2 {
+    // symbols[0] MUST be the empty string per the 2.0 spec.
+    let mut symbols: Vec<String> = vec![String::new()];
+    let mut index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+    let intern = |symbols: &mut Vec<String>,
+                      index: &mut std::collections::HashMap<String, u32>,
+                      text: &str|
+     -> u32 {
+        if text.is_empty() {
+            return 0;
+        }
+        if let Some(reference) = index.get(text) {
+            return *reference;
+        }
+        let reference = u32::try_from(symbols.len()).unwrap_or(0);
+        symbols.push(text.to_owned());
+        index.insert(text.to_owned(), reference);
+        reference
+    };
+
+    let timeseries = batch
+        .into_iter()
+        .map(|series| {
+            let mut labels_refs = Vec::with_capacity(series.labels.len() * 2);
+            for label in &series.labels {
+                labels_refs.push(intern(&mut symbols, &mut index, &label.name));
+                labels_refs.push(intern(&mut symbols, &mut index, &label.value));
+            }
+            TimeSeriesV2 {
+                labels_refs,
+                samples: series.samples,
+            }
+        })
+        .collect();
+    WriteRequestV2 { symbols, timeseries }
 }
 
 /// Split off up to `max_samples` worth of leading series from `pending`.
@@ -407,6 +467,84 @@ mod tests {
         assert_eq!(chunk.len(), 2);
         assert_eq!(samples, 2);
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn v2_encoding_interns_symbols() {
+        let batch = vec![
+            TimeSeries {
+                labels: vec![
+                    Label::new("__name__", "up"),
+                    Label::new("job", "node"),
+                ],
+                samples: vec![Sample {
+                    value: 1.0,
+                    timestamp: 10,
+                }],
+            },
+            TimeSeries {
+                labels: vec![
+                    Label::new("__name__", "up"),
+                    Label::new("job", "other"),
+                ],
+                samples: vec![Sample {
+                    value: 0.0,
+                    timestamp: 10,
+                }],
+            },
+        ];
+        let request = encode_v2(batch);
+        // spec: symbols[0] is the empty string
+        assert_eq!(request.symbols[0], "");
+        // shared strings appear exactly once
+        assert_eq!(
+            request.symbols.iter().filter(|s| *s == "__name__").count(),
+            1
+        );
+        assert_eq!(request.symbols.iter().filter(|s| *s == "up").count(), 1);
+        assert_eq!(request.symbols.iter().filter(|s| *s == "job").count(), 1);
+        // refs resolve back to the original label pairs
+        let resolve = |refs: &[u32]| -> Vec<(String, String)> {
+            refs.chunks(2)
+                .map(|pair| {
+                    (
+                        request.symbols[pair[0] as usize].clone(),
+                        request.symbols[pair[1] as usize].clone(),
+                    )
+                })
+                .collect()
+        };
+        assert_eq!(
+            resolve(&request.timeseries[0].labels_refs),
+            vec![
+                ("__name__".to_owned(), "up".to_owned()),
+                ("job".to_owned(), "node".to_owned())
+            ]
+        );
+        assert_eq!(
+            resolve(&request.timeseries[1].labels_refs)[1].1,
+            "other"
+        );
+        // samples move through untouched
+        assert!((request.timeseries[1].samples[0].value - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn v2_empty_label_value_uses_reserved_zero_ref() {
+        let batch = vec![TimeSeries {
+            labels: vec![Label::new("empty", "")],
+            samples: vec![],
+        }];
+        let request = encode_v2(batch);
+        assert_eq!(request.timeseries[0].labels_refs[1], 0);
+    }
+
+    #[test]
+    fn v2_roundtrips_protobuf() -> anyhow::Result<()> {
+        let request = encode_v2(vec![series("metric_a", 2), series("metric_b", 1)]);
+        let decoded = WriteRequestV2::decode(request.encode_to_vec().as_slice())?;
+        assert_eq!(decoded, request);
+        Ok(())
     }
 
     #[test]

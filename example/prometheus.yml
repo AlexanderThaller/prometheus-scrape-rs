@@ -32,6 +32,8 @@ scrape_configs:
 remote_write:
   - url: https://mimir.example.com/api/v1/push
     name: durable-storage
+    # remote-write 2.0: symbol-table payloads, ~half the bandwidth
+    protobuf_message: io.prometheus.write.v2.Request
     basic_auth:
       username: agent
       password_file: /etc/prometheus/remote-write.password

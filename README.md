@@ -44,7 +44,9 @@ The agent-mode subset of the Prometheus configuration format:
 - `remote_write`: `url`, `name`, `remote_timeout`, `headers`, auth as above,
   `write_relabel_configs`, `queue_config` (`capacity`,
   `max_samples_per_send`, `batch_send_deadline`, `min_backoff`,
-  `max_backoff`)
+  `max_backoff`), `protobuf_message` (`prometheus.WriteRequest` default,
+  or `io.prometheus.write.v2.Request` for remote-write 2.0 with its
+  symbol table — ~40-60% smaller payloads, supported by Mimir >= 2.17)
 
 Relabeling implements the full Prometheus action set: `replace`, `keep`,
 `drop`, `keepequal`, `dropequal`, `hashmod` (MD5, bit-compatible with

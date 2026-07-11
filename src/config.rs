@@ -352,6 +352,19 @@ pub struct RemoteWriteConfig {
     pub tls_config: TlsConfig,
     pub write_relabel_configs: Vec<RelabelConfig>,
     pub queue_config: QueueConfig,
+    /// Remote-write protocol: the 1.0 `prometheus.WriteRequest` (default)
+    /// or the 2.0 `io.prometheus.write.v2.Request` with its symbol table.
+    /// Field name and values match the Prometheus configuration.
+    pub protobuf_message: ProtobufMessage,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+pub enum ProtobufMessage {
+    #[default]
+    #[serde(rename = "prometheus.WriteRequest")]
+    WriteRequestV1,
+    #[serde(rename = "io.prometheus.write.v2.Request")]
+    WriteRequestV2,
 }
 
 impl Default for RemoteWriteConfig {
@@ -367,6 +380,7 @@ impl Default for RemoteWriteConfig {
             tls_config: TlsConfig::default(),
             write_relabel_configs: Vec::new(),
             queue_config: QueueConfig::default(),
+            protobuf_message: ProtobufMessage::default(),
         }
     }
 }

@@ -264,3 +264,122 @@ remote_write:
     );
     Ok(())
 }
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "self-contained end-to-end scenario reads better unsplit"
+)]
+fn remote_write_v2_delivers_symbolized_series() -> anyhow::Result<()> {
+    use prometheus_scrape_rs::model::WriteRequestV2;
+
+    let exporter = TcpListener::bind("127.0.0.1:0")?;
+    let exporter_addr = exporter.local_addr()?;
+    std::thread::spawn(move || serve_scrapes(&exporter));
+
+    // v2-aware receiver: decode WriteRequestV2 and pass it on raw.
+    let receiver = TcpListener::bind("127.0.0.1:0")?;
+    let receiver_addr = receiver.local_addr()?;
+    let (tx, rx) = mpsc::channel::<WriteRequestV2>();
+    std::thread::spawn(move || {
+        for stream in receiver.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 4096];
+            let body = loop {
+                let Ok(n) = stream.read(&mut buf) else { break Vec::new() };
+                raw.extend_from_slice(&buf[..n]);
+                if let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&raw[..header_end]).to_lowercase();
+                    assert!(
+                        headers.contains("proto=io.prometheus.write.v2.request"),
+                        "content-type must announce the v2 proto: {headers}"
+                    );
+                    assert!(headers.contains("x-prometheus-remote-write-version: 2.0.0"));
+                    let content_length: usize = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length:"))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    let body_start = header_end + 4;
+                    if raw.len() >= body_start + content_length {
+                        break raw[body_start..body_start + content_length].to_vec();
+                    }
+                }
+                if n == 0 {
+                    break Vec::new();
+                }
+            };
+            let _ = stream.write_all(
+                b"HTTP/1.1 204 No Content\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            );
+            if body.is_empty() {
+                continue;
+            }
+            let decompressed = snap::raw::Decoder::new()
+                .decompress_vec(&body)
+                .expect("body must be snappy compressed");
+            let request = WriteRequestV2::decode(decompressed.as_slice())
+                .expect("body must be a v2 Request");
+            let _ = tx.send(request);
+        }
+    });
+
+    let config_yaml = format!(
+        r#"
+global:
+  scrape_interval: 1s
+scrape_configs:
+  - job_name: v2
+    static_configs:
+      - targets: ["{exporter_addr}"]
+remote_write:
+  - url: http://{receiver_addr}/api/v1/write
+    protobuf_message: io.prometheus.write.v2.Request
+    queue_config:
+      batch_send_deadline: 200ms
+"#
+    );
+    let dir = std::env::temp_dir().join(format!("prom-scrape-v2-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let config_path = dir.join("prometheus.yml");
+    std::fs::write(&config_path, config_yaml)?;
+    let config = Arc::new(config::load(&config_path)?);
+    std::fs::remove_dir_all(&dir).ok();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let request = runtime.block_on(async move {
+        let (handle, _senders) = remote_write::spawn(&config.remote_write)?;
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let _jobs = scrape::spawn_jobs(&config, &handle, &shutdown_rx);
+        tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(15)))
+            .await?
+            .map_err(|_| anyhow::anyhow!("no v2 Request arrived within 15s"))
+    })?;
+
+    assert_eq!(request.symbols[0], "", "symbols[0] must be empty per spec");
+    let symbol = |r: u32| request.symbols[r as usize].as_str();
+    let mut found_metric = false;
+    for series in &request.timeseries {
+        let labels: Vec<(&str, &str)> = series
+            .labels_refs
+            .chunks(2)
+            .map(|pair| (symbol(pair[0]), symbol(pair[1])))
+            .collect();
+        assert!(
+            labels.iter().any(|(name, value)| *name == "job" && *value == "v2"),
+            "series must carry the job label: {labels:?}"
+        );
+        if labels
+            .iter()
+            .any(|(name, value)| *name == "__name__" && *value == "test_metric")
+        {
+            found_metric = true;
+            assert!((series.samples[0].value - 42.0).abs() < f64::EPSILON);
+        }
+    }
+    assert!(found_metric, "test_metric not found in v2 request");
+    Ok(())
+}
