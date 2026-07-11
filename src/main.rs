@@ -11,6 +11,12 @@ use tracing::{error, info, warn};
 use prometheus_scrape_rs::web::{LifecycleCommand, LifecycleRequest, WebState};
 use prometheus_scrape_rs::{config, remote_write, scrape, web};
 
+/// mimalloc outperforms the system allocator for this allocation pattern
+/// (many short-lived label/sample strings) and, unlike musl's malloc, stays
+/// fast in fully static musl builds.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// A lightweight Prometheus agent: scrape targets, forward via `remote_write`.
 #[derive(Debug, clap::Parser)]
 #[command(version, about)]
@@ -79,6 +85,7 @@ impl Args {
 }
 
 fn main() -> anyhow::Result<()> {
+    prometheus_scrape_rs::auth::ensure_crypto_provider();
     let args = Args::parse();
     tracing_subscriber::fmt()
         .with_env_filter(

@@ -27,6 +27,10 @@ use prometheus_scrape_rs::{
 };
 use prost::Message as _;
 
+/// Same allocator as the shipped binary so numbers reflect production.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// A realistic scrape body: counters, gauges, and histograms with HELP/TYPE
 /// comments, roughly what a `node_exporter` or app endpoint produces.
 fn scrape_body(series: usize) -> String {
