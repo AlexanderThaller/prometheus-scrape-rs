@@ -276,8 +276,10 @@ impl Endpoint {
                 }
             }
         }
-        let compressed = match encoder.compress_vec(proto_buf) {
-            Ok(compressed) => compressed,
+        // `Bytes` so the per-attempt body handoff below is a refcount
+        // bump instead of a full copy of the compressed payload.
+        let compressed: bytes::Bytes = match encoder.compress_vec(proto_buf) {
+            Ok(compressed) => compressed.into(),
             Err(err) => {
                 error!(endpoint = self.name, %err, "snappy compression failed; dropping batch");
                 return;
@@ -330,7 +332,7 @@ impl Endpoint {
         }
     }
 
-    async fn send_once(&self, body: Vec<u8>, sample_count: u64) -> Result<(), SendError> {
+    async fn send_once(&self, body: bytes::Bytes, sample_count: u64) -> Result<(), SendError> {
         let (content_type, version) = match self.protocol {
             ProtobufMessage::WriteRequestV1 => ("application/x-protobuf", "0.1.0"),
             ProtobufMessage::WriteRequestV2 => (

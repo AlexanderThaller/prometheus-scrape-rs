@@ -124,14 +124,14 @@ File: `src/relabel.rs`.
 * Tests: fast-path vs general-path parity per action, including anchoring
   semantics (a literal must match the whole joined value).
 
-=== 4. Stop cloning the compressed payload per send attempt — status: open
+=== 4. Stop cloning the compressed payload per send attempt — status: *done*
 
 File: `src/remote_write.rs`.
 
-Wrap the snappy output in `bytes::Bytes` once (prost already brings `bytes`
-into the tree; add it as a direct dependency). `reqwest` bodies built from
-`Bytes` clone by refcount — removes one full payload copy per request plus
-one per retry.
+The snappy output is wrapped in `bytes::Bytes` once; `reqwest` bodies built
+from `Bytes` clone by refcount. Removes one payload-sized allocation + copy
+per batch send plus one per retry. Not on the training-workload path, so no
+hyperfine delta — the win shows up per remote-write batch in production.
 
 === 5. k8s reflectors: strip `managedFields` — status: open
 
