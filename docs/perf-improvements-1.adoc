@@ -85,9 +85,13 @@ Target was ~14–16% CPU. Files: `src/parser.rs`, `Cargo.toml` (added
 
 The existing parser tests gate parity.
 
-=== 2. Single-pass protobuf encoding — status: open
+=== 2. Single-pass protobuf encoding — status: *done, ~1.03x*
 
-Target: ~11% CPU. Files: `src/model.rs`, `src/remote_write.rs`,
+Measured 2026-07-12 (hyperfine, 10 runs, training workload): 5.587 s →
+5.423 s ± 0.036 on top of candidate 1, *cumulative 1.12 ± 0.01x vs the
+round baseline*. Output verified byte-identical to the prost derive.
+
+Target was ~11% CPU. Files: `src/model.rs`, `src/remote_write.rs`,
 `src/pgo.rs`.
 
 * Hand-written `encode_into(&self, buf: &mut Vec<u8>)` for the v1

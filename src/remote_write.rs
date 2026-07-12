@@ -265,13 +265,16 @@ impl Endpoint {
         let series_count = batch.len();
         let sample_count: u64 = batch.iter().map(|series| series.samples.len() as u64).sum();
         proto_buf.clear();
-        let encode_result = match self.protocol {
-            ProtobufMessage::WriteRequestV1 => WriteRequest { timeseries: batch }.encode(proto_buf),
-            ProtobufMessage::WriteRequestV2 => encode_v2(batch).encode(proto_buf),
-        };
-        if let Err(err) = encode_result {
-            error!(endpoint = self.name, %err, "encoding write request failed; dropping batch");
-            return;
+        match self.protocol {
+            ProtobufMessage::WriteRequestV1 => {
+                WriteRequest { timeseries: batch }.encode_into(proto_buf);
+            }
+            ProtobufMessage::WriteRequestV2 => {
+                if let Err(err) = encode_v2(batch).encode(proto_buf) {
+                    error!(endpoint = self.name, %err, "encoding write request failed; dropping batch");
+                    return;
+                }
+            }
         }
         let compressed = match encoder.compress_vec(proto_buf) {
             Ok(compressed) => compressed,
