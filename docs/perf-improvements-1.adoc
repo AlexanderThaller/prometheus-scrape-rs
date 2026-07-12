@@ -168,6 +168,24 @@ re-derivation. Compressing it (~4–5x on exposition text) saves an
 estimated ~30 MiB at 311k series, at the cost of one snappy compress per
 scrape and a decompress on vanish events only.
 
+== Round result (2026-07-12)
+
+Candidates 1–5 shipped. Training workload (hyperfine, 10 runs each):
+*6.069 s ± 0.033 → 4.909 s ± 0.035, 1.24 ± 0.01x faster*. Peak RSS
+unchanged (21.3 MiB — no allocation-count changes this round). Final
+profile confirms the targeted symbols shrank in absolute terms:
+
+* `parser::parse` ~0.87 s → ~0.47 s (−45%)
+* protobuf encode ~0.69 s → ~0.41 s (−40%)
+* regex machinery ~1.15 s → ~0.47 s (−59%; the remainder is the
+  capture-group replace rule, correctly on the general path)
+* snappy and allocator unchanged in absolute terms, as expected
+
+The allocator is now the largest remaining block (~16.5% of the smaller
+total ≈ 0.81 s), which makes the CompactString experiment (candidate 6)
+the clear next lever. Candidate 5 (managedFields) needs its dev-replica
+RSS A/B; candidates 7–8 remain open.
+
 == Verification
 
 * `cargo test` and `cargo clippy --all-targets` with zero warnings.
