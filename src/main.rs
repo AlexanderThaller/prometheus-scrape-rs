@@ -268,6 +268,10 @@ async fn wait_for_stop(
     sigterm: &mut tokio::signal::unix::Signal,
     sighup: &mut tokio::signal::unix::Signal,
 ) -> StopReason {
+    // With lifecycle endpoints disabled the sender side is dropped at
+    // startup and `recv()` resolves `None` immediately; the arm must stop
+    // being polled or this select loop spins at 100% CPU.
+    let mut lifecycle_open = true;
     loop {
         tokio::select! {
             result = tokio::signal::ctrl_c() => {
@@ -291,8 +295,11 @@ async fn wait_for_stop(
                     Err(err) => error!(%err, "config reload failed; keeping current configuration"),
                 }
             }
-            request = lifecycle_rx.recv() => {
-                let Some(request) = request else { continue };
+            request = lifecycle_rx.recv(), if lifecycle_open => {
+                let Some(request) = request else {
+                    lifecycle_open = false;
+                    continue;
+                };
                 match request.command {
                     LifecycleCommand::Quit => {
                         info!("termination requested via /-/quit");
