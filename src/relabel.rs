@@ -113,7 +113,8 @@ impl AnchoredRegex {
                 // `.*` does not cross newlines, and `$` only matches at the
                 // very end, so a newline anywhere in the remainder means the
                 // anchored regex would not match.
-                value.strip_prefix(prefix.as_str())
+                value
+                    .strip_prefix(prefix.as_str())
                     .is_some_and(|rest| !rest.contains('\n'))
             }
             PatternKind::General => self.regex.is_match(value),
@@ -305,7 +306,8 @@ fn apply(set: &mut LabelSet, config: &RelabelConfig, val: &mut String) -> bool {
             }
         }
         Action::LabelDrop => {
-            set.labels.retain(|label| !config.regex.matches(&label.name));
+            set.labels
+                .retain(|label| !config.regex.matches(&label.name));
         }
         Action::LabelKeep => {
             set.labels.retain(|label| config.regex.matches(&label.name));
@@ -501,10 +503,17 @@ mod tests {
         // `matches` (fast path when classified) and the raw anchored regex.
         let cases: &[(&str, &[&str])] = &[
             // Literals: anchored match is equality, substrings must fail.
-            ("metrics", &["metrics", "metrics2", "xmetrics", "metric", ""]),
+            (
+                "metrics",
+                &["metrics", "metrics2", "xmetrics", "metric", ""],
+            ),
             (
                 "D2:21:F9:90:8D:39",
-                &["D2:21:F9:90:8D:39", "D2:21:F9:90:8D:39x", "d2:21:f9:90:8d:39"],
+                &[
+                    "D2:21:F9:90:8D:39",
+                    "D2:21:F9:90:8D:39x",
+                    "d2:21:f9:90:8d:39",
+                ],
             ),
             ("", &["", "x"]),
             // Literal prefixes: starts_with, but `.` must not cross newlines.
@@ -514,7 +523,11 @@ mod tests {
             ),
             (
                 "go_gc_duration_seconds.*",
-                &["go_gc_duration_seconds", "go_gc_duration_seconds_sum", "go_gc"],
+                &[
+                    "go_gc_duration_seconds",
+                    "go_gc_duration_seconds_sum",
+                    "go_gc",
+                ],
             ),
             // General patterns for control.
             ("(Failed|Succeeded)", &["Failed", "Succeeded", "Running"]),
@@ -597,9 +610,7 @@ mod tests {
         );
         // Newline after the prefix: the anchored regex would not match, so
         // the series must be kept.
-        assert!(
-            process(labels(&[("__name__", "go_gc_x\ny")]), &[drop_prefix]).is_some()
-        );
+        assert!(process(labels(&[("__name__", "go_gc_x\ny")]), &[drop_prefix]).is_some());
     }
 
     #[test]
