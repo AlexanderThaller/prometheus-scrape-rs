@@ -197,7 +197,7 @@ impl Target {
     /// Stable identity across discovery updates: URL, params and final
     /// label set. Targets with equal identity are the same series source.
     fn identity(&self) -> u64 {
-        let mut hasher = FnvHasher::default();
+        let mut hasher = crate::hash::FxHasher::default();
         hasher.write(self.url.as_bytes());
         for (name, value) in &self.params {
             hasher.write(name.as_bytes());
@@ -292,7 +292,7 @@ async fn scrape_loop(
 ) {
     // Deterministic per-target offset spreads scrapes over the interval,
     // like Prometheus' scrapeloop offset.
-    let offset_nanos = fnv1a(target.url.as_bytes())
+    let offset_nanos = hash_bytes(target.url.as_bytes())
         % u64::try_from(target.interval.as_nanos()).unwrap_or(u64::MAX);
     tokio::select! {
         () = tokio::time::sleep(Duration::from_nanos(offset_nanos)) => {}
@@ -430,7 +430,7 @@ impl SeriesTracker {
         &mut self,
         target: &Target,
         batch: &[TimeSeries],
-        retained_body: Option<String>,
+        retained_body: Option<bytes::Bytes>,
         start_ms: i64,
     ) -> Vec<TimeSeries> {
         let mut current: Vec<u64> = batch
@@ -451,7 +451,7 @@ impl SeriesTracker {
 
         self.hashes = current;
         self.retained = retained_body.and_then(|body| {
-            match self.encoder.compress_vec(body.as_bytes()) {
+            match self.encoder.compress_vec(&body) {
                 Ok(compressed) => Some(RetainedScrape {
                     compressed,
                     start_ms,
@@ -587,7 +587,7 @@ struct ScrapeOutcome {
     report: Vec<TimeSeries>,
     /// Raw exposition body, present only when `series` was actually
     /// emitted — staleness tracking must reflect what was sent.
-    retained_body: Option<String>,
+    retained_body: Option<bytes::Bytes>,
     start_ms: i64,
     error: Option<String>,
 }
@@ -610,37 +610,48 @@ async fn scrape_once(
     let mut batch: Vec<TimeSeries> = Vec::new();
 
     match result {
-        Ok(body) => match crate::parser::parse(&body, start_ms, target.honor_timestamps) {
-            Ok(series) => {
-                scraped = series.len();
-                crate::telemetry::METRICS
-                    .samples_scraped_total
-                    .add(scraped as u64);
-                if target.sample_limit > 0 && scraped as u64 > target.sample_limit {
-                    error = Some(format!(
-                        "sample_limit exceeded ({scraped} > {}); scrape discarded",
-                        target.sample_limit
-                    ));
-                } else {
-                    up = 1.0;
-                    batch.reserve(series.len() + 5);
-                    for mut single in series {
-                        let Some(labels) =
-                            finalize_series_labels(std::mem::take(&mut single.labels), target)
-                        else {
-                            continue;
-                        };
-                        single.labels = labels;
-                        batch.push(single);
-                    }
-                    kept = batch.len();
-                    retained_body = Some(body);
+        Ok(body) => {
+            // Validation instead of `text()`'s lossy conversion: no
+            // full-body copy per scrape, and a body Prometheus could not
+            // have parsed anyway becomes a scrape error, not mojibake.
+            match std::str::from_utf8(&body) {
+                Err(err) => {
+                    error = Some(format!("scrape body is not valid UTF-8: {err}"));
                 }
+                Ok(text) => match crate::parser::parse(text, start_ms, target.honor_timestamps) {
+                    Ok(series) => {
+                        scraped = series.len();
+                        crate::telemetry::METRICS
+                            .samples_scraped_total
+                            .add(scraped as u64);
+                        if target.sample_limit > 0 && scraped as u64 > target.sample_limit {
+                            error = Some(format!(
+                                "sample_limit exceeded ({scraped} > {}); scrape discarded",
+                                target.sample_limit
+                            ));
+                        } else {
+                            up = 1.0;
+                            batch.reserve(series.len() + 5);
+                            for mut single in series {
+                                let Some(labels) = finalize_series_labels(
+                                    std::mem::take(&mut single.labels),
+                                    target,
+                                ) else {
+                                    continue;
+                                };
+                                single.labels = labels;
+                                batch.push(single);
+                            }
+                            kept = batch.len();
+                            retained_body = Some(body);
+                        }
+                    }
+                    Err(err) => {
+                        error = Some(format!("scrape body failed to parse: {err}"));
+                    }
+                },
             }
-            Err(err) => {
-                error = Some(format!("scrape body failed to parse: {err}"));
-            }
-        },
+        }
         Err(err) => {
             error = Some(format!("{err:#}"));
         }
@@ -685,7 +696,7 @@ async fn fetch(
     target: &Target,
     client: &reqwest::Client,
     credentials: &Credentials,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<bytes::Bytes> {
     let mut builder = client
         .get(&target.url)
         .header(
@@ -705,7 +716,7 @@ async fn fetch(
     if !status.is_success() {
         anyhow::bail!("server returned HTTP {status}");
     }
-    Ok(response.text().await?)
+    Ok(response.bytes().await?)
 }
 
 /// The deterministic series-building pipeline: merge target labels, apply
@@ -786,52 +797,25 @@ fn now_ms() -> i64 {
         })
 }
 
-fn fnv1a(data: &[u8]) -> u64 {
-    let mut hasher = FnvHasher::default();
+fn hash_bytes(data: &[u8]) -> u64 {
+    let mut hasher = crate::hash::FxHasher::default();
     hasher.write(data);
     hasher.finish()
 }
 
-/// FNV-1a, 64 bit. Used for scrape offsets, target identities and series
-/// label-set hashes; not exposed on the wire.
-struct FnvHasher {
-    hash: u64,
-}
-
-impl Default for FnvHasher {
-    fn default() -> Self {
-        Self {
-            hash: 0xcbf2_9ce4_8422_2325,
-        }
-    }
-}
-
-impl std::hash::Hasher for FnvHasher {
-    fn write(&mut self, bytes: &[u8]) {
-        for byte in bytes {
-            self.hash ^= u64::from(*byte);
-            self.hash = self.hash.wrapping_mul(0x100_0000_01b3);
-        }
-    }
-
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-}
-
-/// Hash a label set; a separator byte between fields keeps
-/// `("ab","c")` distinct from `("a","bc")`.
-fn hash_labels_into(hasher: &mut FnvHasher, labels: &[Label]) {
+/// Hash a label set. [`crate::hash::FxHasher`] folds each part's length
+/// into the state, which keeps `("ab","c")` distinct from `("a","bc")`
+/// without separator bytes. Used for scrape offsets, target identities and
+/// the staleness tracker's series identities; never leaves the process.
+fn hash_labels_into(hasher: &mut crate::hash::FxHasher, labels: &[Label]) {
     for label in labels {
         hasher.write(label.name.as_bytes());
-        hasher.write(&[0xff]);
         hasher.write(label.value.as_bytes());
-        hasher.write(&[0xfe]);
     }
 }
 
 fn hash_labels(labels: &[Label]) -> u64 {
-    let mut hasher = FnvHasher::default();
+    let mut hasher = crate::hash::FxHasher::default();
     hash_labels_into(&mut hasher, labels);
     hasher.finish()
 }
@@ -867,9 +851,11 @@ mod tests {
     }
 
     #[test]
-    fn fnv1a_matches_reference_vector() {
-        // FNV-1a 64-bit of "a" is 0xaf63dc4c8601ec8c.
-        assert_eq!(fnv1a(b"a"), 0xaf63_dc4c_8601_ec8c);
+    fn hash_bytes_is_deterministic() {
+        // The hash is process-internal: only self-consistency matters,
+        // there is no external reference vector to pin.
+        assert_eq!(hash_bytes(b"a"), hash_bytes(b"a"));
+        assert_ne!(hash_bytes(b"a"), hash_bytes(b"b"));
     }
 
     /// Minimal target for tracker tests: no relabeling, one external label.
@@ -886,6 +872,11 @@ mod tests {
             metric_relabel_configs: Vec::new(),
             external_labels: Arc::new([Label::new("origin", "tracker-test")]),
         }
+    }
+
+    /// A scrape body as the tracker receives it from `fetch`.
+    fn retained(body: &str) -> Option<bytes::Bytes> {
+        Some(bytes::Bytes::copy_from_slice(body.as_bytes()))
     }
 
     /// Reproduce the live pipeline for a raw body: parse + finalize labels.
@@ -914,7 +905,7 @@ mod tests {
         let batch1 = simulate_scrape(&target, body1, ts1);
         assert!(
             tracker
-                .advance(&target, &batch1, Some(body1.to_owned()), ts1)
+                .advance(&target, &batch1, retained(body1), ts1)
                 .is_empty()
         );
         assert_eq!(tracker.hashes.len(), 2);
@@ -924,7 +915,7 @@ mod tests {
         let body2 = "metric_a{case=\"x\"} 1\nexplicit 3 500\n";
         let ts2 = 2_000;
         let batch2 = simulate_scrape(&target, body2, ts2);
-        let markers = tracker.advance(&target, &batch2, Some(body2.to_owned()), ts2);
+        let markers = tracker.advance(&target, &batch2, retained(body2), ts2);
         assert_eq!(markers.len(), 1);
         assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_b");
         assert_eq!(get_label(&markers[0].labels, "job"), "test");
@@ -951,7 +942,7 @@ mod tests {
         let batch4 = simulate_scrape(&target, body2, ts4);
         assert!(
             tracker
-                .advance(&target, &batch4, Some(body2.to_owned()), ts4)
+                .advance(&target, &batch4, retained(body2), ts4)
                 .is_empty()
         );
 
@@ -977,7 +968,7 @@ mod tests {
         let body1 = "kept_a 1\ndropped_b 2\n";
         let batch1 = simulate_scrape(&target, body1, 1_000);
         assert_eq!(batch1.len(), 1);
-        tracker.advance(&target, &batch1, Some(body1.to_owned()), 1_000);
+        tracker.advance(&target, &batch1, retained(body1), 1_000);
         assert_eq!(tracker.hashes.len(), 1);
 
         // Everything vanishes; only kept_a may produce a marker.

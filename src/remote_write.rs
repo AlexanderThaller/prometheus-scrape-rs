@@ -392,44 +392,8 @@ enum SendError {
     Unrecoverable(String),
 }
 
-/// FxHash-style hasher for the symbol-interning map. The std default
-/// `SipHash` was ~12% of live CPU on the remote-write path; label strings
-/// are short, hashes never leave the process, and hash-flooding is not a
-/// concern for data the agent scraped itself.
-#[derive(Debug, Default)]
-struct FxHasher {
-    hash: u64,
-}
-
-impl FxHasher {
-    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
-
-    fn add(&mut self, word: u64) {
-        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
-    }
-}
-
-impl std::hash::Hasher for FxHasher {
-    fn write(&mut self, bytes: &[u8]) {
-        let (chunks, rest) = bytes.as_chunks::<8>();
-        for chunk in chunks {
-            self.add(u64::from_le_bytes(*chunk));
-        }
-        if !rest.is_empty() {
-            let mut word = [0u8; 8];
-            word[..rest.len()].copy_from_slice(rest);
-            self.add(u64::from_le_bytes(word));
-        }
-        // Fold in the length so zero-padded tails stay distinct.
-        self.add(bytes.len() as u64);
-    }
-
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-}
-
-type FxMap<'a> = std::collections::HashMap<&'a str, u32, std::hash::BuildHasherDefault<FxHasher>>;
+type FxMap<'a> =
+    std::collections::HashMap<&'a str, u32, std::hash::BuildHasherDefault<crate::hash::FxHasher>>;
 
 /// Reusable buffers for the v2 encoder, held across batches by the sender
 /// task so steady state allocates nothing per series.

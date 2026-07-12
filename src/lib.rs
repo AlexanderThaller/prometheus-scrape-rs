@@ -4,6 +4,7 @@
 
 pub mod auth;
 pub mod config;
+mod hash;
 pub mod model;
 pub mod parser;
 #[doc(hidden)]

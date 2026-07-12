@@ -155,7 +155,14 @@ Target: the ~23% live CPU block plus its allocations. Files:
 * Parity test: byte-equality against the current `encode_v2` +
   prost-derive output for a corpus batch.
 
-=== 2. Fetch scrape bodies without the lossy copy — status: open
+=== 2. Fetch scrape bodies without the lossy copy — status: *done*
+
+Measured 2026-07-13 (live harness, 120 s): `Utf8Chunks` (5.8%) is gone
+from the profile and the replacing `from_utf8` validation does not
+register above 1%; total 7075 → 6938 samples. One full-body allocation +
+copy per scrape eliminated; the body now flows as `Bytes` from reqwest
+through parsing into the retained-body compressor. Invalid UTF-8 is a
+scrape error (Prometheus could not have parsed such a body either).
 
 Target: ~4.3% live CPU + one full-body allocation/copy per scrape.
 File: `src/scrape.rs` (`fetch`).
@@ -166,15 +173,16 @@ which copies the whole body. Switch to `response.bytes()` +
 UTF-8 as a scrape error like Prometheus does). The retained-body
 compression consumes `&[u8]` anyway.
 
-=== 3. Faster series hashing in the staleness tracker — status: open
+=== 3. Faster series hashing in the staleness tracker — status: *done, CPU-neutral (memory-bound)*
 
-Target: part of the 12.6% `scrape_loop` block. File: `src/scrape.rs`.
-
-`hash_labels` runs byte-at-a-time FNV-1a over every label of every series
-each scrape (~1 byte/cycle). The hashes are only ever compared within the
-process lifetime, so any stable-within-process 64-bit hash qualifies:
-process 8-byte chunks with wrapping multiplies (FxHash-style) or fold the
-existing FNV over `u64` words. No new dependency required.
+The byte-at-a-time FNV-1a was replaced by the shared word-at-a-time
+`hash::FxHasher` (also used by the interning map; length-folding makes the
+old separator bytes unnecessary). Live harness: the tracker block dropped
+from ~17.3% to ~14.4% but total CPU stayed flat — annotation shows the
+cost is cache misses walking every label's bytes per series, not hash
+arithmetic. Conclusion: the win requires hashing while labels are hot in
+`finalize_series_labels`, which candidate 4's internal series type can
+carry as a precomputed `labels_hash` — folded into candidate 4.
 
 === 4. Single-sample series in the internal model — status: open
 
