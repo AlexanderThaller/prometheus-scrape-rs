@@ -342,7 +342,7 @@ mod tests {
     }
 
     /// The bytes-labels experiment showed `Label` size directly moves the
-    /// hot paths (48 → 64 bytes was part of its regression). CompactString
+    /// hot paths (48 → 64 bytes was part of its regression). `CompactString`
     /// keeps parity with the two former `String`s.
     #[test]
     fn label_stays_48_bytes() {

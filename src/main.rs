@@ -238,7 +238,7 @@ async fn self_monitor_loop(
         Label::new("instance", hostname),
     ];
     for (name, value) in &config.global.external_labels {
-        if !labels.iter().any(|label| &label.name == name) {
+        if !labels.iter().any(|label| label.name == name) {
             labels.push(Label::new(name.clone(), value.clone()));
         }
     }
