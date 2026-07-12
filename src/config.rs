@@ -50,8 +50,8 @@ fn expand_env_vars(raw: &str) -> String {
             std::env::var(name).unwrap_or_else(|_| {
                 tracing::warn!(
                     variable = name,
-                    "config references $({name}) but the environment variable is not set; \
-                     leaving it as-is"
+                    "config references $({name}) but the environment variable is not set; leaving \
+                     it as-is"
                 );
                 caps[0].to_owned()
             })
@@ -82,8 +82,8 @@ impl Config {
         ] {
             if value.is_some() {
                 anyhow::bail!(
-                    "field {section} is not supported: this is a scraping agent \
-                     (like Prometheus agent mode); remove the section from the config"
+                    "field {section} is not supported: this is a scraping agent (like Prometheus \
+                     agent mode); remove the section from the config"
                 );
             }
         }
@@ -245,8 +245,8 @@ impl KubernetesSdConfig {
         match self.role {
             KubernetesRole::Pod | KubernetesRole::Endpointslice => Ok(()),
             unsupported => Err(format!(
-                "kubernetes_sd_configs role {unsupported:?} is not supported yet \
-                 (supported: pod, endpointslice)"
+                "kubernetes_sd_configs role {unsupported:?} is not supported yet (supported: pod, \
+                 endpointslice)"
             )),
         }
     }
@@ -640,7 +640,11 @@ global:
 
     #[test]
     fn rejects_server_only_sections_with_agent_hint() {
-        for section in ["rule_files: ['alerts.yml']", "alerting: {}", "remote_read: []"] {
+        for section in [
+            "rule_files: ['alerts.yml']",
+            "alerting: {}",
+            "remote_read: []",
+        ] {
             let yaml = format!("{section}\nscrape_configs: []\n");
             let config: Config = serde_saphyr::from_str(&yaml).expect("must parse");
             let err = config.validate().expect_err("must be rejected").to_string();

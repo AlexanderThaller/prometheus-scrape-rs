@@ -406,8 +406,7 @@ mod tests {
         assert_eq!(get(&out, "lit"), Some("fixed"));
 
         // newline in value: default anchored regex does not match -> unchanged
-        let out =
-            process(labels(&[("a", "v\n1")]), std::slice::from_ref(&copy)).expect("kept");
+        let out = process(labels(&[("a", "v\n1")]), std::slice::from_ref(&copy)).expect("kept");
         assert_eq!(get(&out, "copy"), None);
 
         // empty joined value deletes the target label (matches general path)

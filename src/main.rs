@@ -1,18 +1,40 @@
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::{
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::Ordering,
+    },
+};
 
 use anyhow::Context as _;
 use clap::Parser as _;
-use tokio::signal::unix::{SignalKind, signal};
-use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tokio::{
+    signal::unix::{
+        SignalKind,
+        signal,
+    },
+    sync::mpsc,
+};
+use tracing::{
+    error,
+    info,
+    warn,
+};
 
-use prometheus_scrape_rs::model::Label;
-use prometheus_scrape_rs::remote_write::RemoteWriteHandle;
-use prometheus_scrape_rs::telemetry::METRICS;
-use prometheus_scrape_rs::web::{LifecycleCommand, LifecycleRequest, WebState};
-use prometheus_scrape_rs::{config, remote_write, scrape, web};
+use prometheus_scrape_rs::{
+    config,
+    model::Label,
+    remote_write,
+    remote_write::RemoteWriteHandle,
+    scrape,
+    telemetry::METRICS,
+    web,
+    web::{
+        LifecycleCommand,
+        LifecycleRequest,
+        WebState,
+    },
+};
 
 /// mimalloc outperforms the system allocator for this allocation pattern
 /// (many short-lived label/sample strings) and, unlike musl's malloc, stays
@@ -119,7 +141,8 @@ fn main() -> anyhow::Result<()> {
 }
 
 fn load_config(path: &std::path::Path) -> anyhow::Result<Arc<config::Config>> {
-    let config = config::load(path).with_context(|| format!("loading config {}", path.display()))?;
+    let config =
+        config::load(path).with_context(|| format!("loading config {}", path.display()))?;
     if config.remote_write.is_empty() {
         anyhow::bail!("no remote_write endpoints configured; scraped data would be discarded");
     }
@@ -228,7 +251,9 @@ async fn self_monitor_loop(
         }
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX));
+            .map_or(0, |elapsed| {
+                i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX)
+            });
         remote_write.send(METRICS.series(&labels, timestamp));
     }
 }

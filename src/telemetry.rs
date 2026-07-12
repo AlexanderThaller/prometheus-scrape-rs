@@ -5,10 +5,24 @@
 //! Deliberately dependency-free: the agent's own metrics are a fixed set of
 //! counters and gauges, not worth a client-library dependency.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::atomic::{
+        AtomicU64,
+        Ordering,
+    },
+    time::{
+        SystemTime,
+        UNIX_EPOCH,
+    },
+};
 
-use crate::model::{Label, METRIC_NAME_LABEL, Sample, TimeSeries, sort_labels};
+use crate::model::{
+    Label,
+    METRIC_NAME_LABEL,
+    Sample,
+    TimeSeries,
+    sort_labels,
+};
 
 /// Global registry; incremented from the scrape and remote-write paths.
 pub static METRICS: Metrics = Metrics::new();
@@ -205,9 +219,9 @@ impl Metrics {
         }
         let _ = writeln!(
             body,
-            "# HELP prometheus_scrape_rs_build_info Build information.\n\
-             # TYPE prometheus_scrape_rs_build_info gauge\n\
-             prometheus_scrape_rs_build_info{{version=\"{}\"}} 1",
+            "# HELP prometheus_scrape_rs_build_info Build information.\n# TYPE \
+             prometheus_scrape_rs_build_info \
+             gauge\nprometheus_scrape_rs_build_info{{version=\"{}\"}} 1",
             env!("CARGO_PKG_VERSION")
         );
         body
@@ -297,7 +311,11 @@ mod tests {
         assert!(!series.is_empty());
         for s in &series {
             assert!(s.labels.windows(2).all(|w| w[0].name < w[1].name));
-            assert!(s.labels.iter().any(|l| l.name == "job" && l.value == "self"));
+            assert!(
+                s.labels
+                    .iter()
+                    .any(|l| l.name == "job" && l.value == "self")
+            );
             assert_eq!(s.samples[0].timestamp, 5_000);
         }
     }

@@ -263,15 +263,10 @@ impl Endpoint {
         }
 
         let series_count = batch.len();
-        let sample_count: u64 = batch
-            .iter()
-            .map(|series| series.samples.len() as u64)
-            .sum();
+        let sample_count: u64 = batch.iter().map(|series| series.samples.len() as u64).sum();
         proto_buf.clear();
         let encode_result = match self.protocol {
-            ProtobufMessage::WriteRequestV1 => {
-                WriteRequest { timeseries: batch }.encode(proto_buf)
-            }
+            ProtobufMessage::WriteRequestV1 => WriteRequest { timeseries: batch }.encode(proto_buf),
             ProtobufMessage::WriteRequestV2 => encode_v2(batch).encode(proto_buf),
         };
         if let Err(err) = encode_result {
@@ -405,8 +400,8 @@ fn encode_v2(batch: Vec<TimeSeries>) -> WriteRequestV2 {
     let mut symbols: Vec<String> = vec![String::new()];
     let mut index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
     let intern = |symbols: &mut Vec<String>,
-                      index: &mut std::collections::HashMap<String, u32>,
-                      text: &str|
+                  index: &mut std::collections::HashMap<String, u32>,
+                  text: &str|
      -> u32 {
         if text.is_empty() {
             return 0;
@@ -434,7 +429,10 @@ fn encode_v2(batch: Vec<TimeSeries>) -> WriteRequestV2 {
             }
         })
         .collect();
-    WriteRequestV2 { symbols, timeseries }
+    WriteRequestV2 {
+        symbols,
+        timeseries,
+    }
 }
 
 /// Split off up to `max_samples` worth of leading series from `pending`.
@@ -498,20 +496,14 @@ mod tests {
     fn v2_encoding_interns_symbols() {
         let batch = vec![
             TimeSeries {
-                labels: vec![
-                    Label::new("__name__", "up"),
-                    Label::new("job", "node"),
-                ],
+                labels: vec![Label::new("__name__", "up"), Label::new("job", "node")],
                 samples: vec![Sample {
                     value: 1.0,
                     timestamp: 10,
                 }],
             },
             TimeSeries {
-                labels: vec![
-                    Label::new("__name__", "up"),
-                    Label::new("job", "other"),
-                ],
+                labels: vec![Label::new("__name__", "up"), Label::new("job", "other")],
                 samples: vec![Sample {
                     value: 0.0,
                     timestamp: 10,
@@ -546,10 +538,7 @@ mod tests {
                 ("job".to_owned(), "node".to_owned())
             ]
         );
-        assert_eq!(
-            resolve(&request.timeseries[1].labels_refs)[1].1,
-            "other"
-        );
+        assert_eq!(resolve(&request.timeseries[1].labels_refs)[1].1, "other");
         // samples move through untouched
         assert!((request.timeseries[1].samples[0].value - 0.0).abs() < f64::EPSILON);
     }

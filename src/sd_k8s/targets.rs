@@ -13,18 +13,30 @@
 //! target label sets are expressed as one [`TargetGroup`] per target with a
 //! single-element `targets` vector.
 
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{
+    collections::{
+        BTreeMap,
+        HashMap,
+    },
+    sync::Arc,
+};
 
-use k8s_openapi::api::core::v1::Container;
-use k8s_openapi::api::core::v1::Node;
-use k8s_openapi::api::core::v1::Pod;
-use k8s_openapi::api::core::v1::Service;
-use k8s_openapi::api::discovery::v1::Endpoint;
-use k8s_openapi::api::discovery::v1::EndpointPort;
-use k8s_openapi::api::discovery::v1::EndpointSlice;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use k8s_openapi::{
+    api::{
+        core::v1::{
+            Container,
+            Node,
+            Pod,
+            Service,
+        },
+        discovery::v1::{
+            Endpoint,
+            EndpointPort,
+            EndpointSlice,
+        },
+    },
+    apimachinery::pkg::apis::meta::v1::ObjectMeta,
+};
 
 use crate::sd::TargetGroup;
 
@@ -40,7 +52,13 @@ const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 /// `_`. Equivalent to Prometheus' `strutil.SanitizeLabelName`.
 fn sanitize_label_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -65,7 +83,10 @@ fn add_object_annotations_and_labels(
     if let Some(object_labels) = &meta.labels {
         for (key, value) in object_labels {
             let sanitized = sanitize_label_name(key);
-            labels.insert(format!("{META_PREFIX}{role}_label_{sanitized}"), value.clone());
+            labels.insert(
+                format!("{META_PREFIX}{role}_label_{sanitized}"),
+                value.clone(),
+            );
             labels.insert(
                 format!("{META_PREFIX}{role}_labelpresent_{sanitized}"),
                 "true".to_owned(),
@@ -75,7 +96,10 @@ fn add_object_annotations_and_labels(
     if let Some(annotations) = &meta.annotations {
         for (key, value) in annotations {
             let sanitized = sanitize_label_name(key);
-            labels.insert(format!("{META_PREFIX}{role}_annotation_{sanitized}"), value.clone());
+            labels.insert(
+                format!("{META_PREFIX}{role}_annotation_{sanitized}"),
+                value.clone(),
+            );
             labels.insert(
                 format!("{META_PREFIX}{role}_annotationpresent_{sanitized}"),
                 "true".to_owned(),
@@ -156,7 +180,10 @@ fn pod_labels(pod: &Pod) -> BTreeMap<String, String> {
     );
     labels.insert(
         format!("{META_PREFIX}pod_node_name"),
-        pod.spec.as_ref().and_then(|s| s.node_name.clone()).unwrap_or_default(),
+        pod.spec
+            .as_ref()
+            .and_then(|s| s.node_name.clone())
+            .unwrap_or_default(),
     );
     labels.insert(
         format!("{META_PREFIX}pod_host_ip"),
@@ -171,10 +198,16 @@ fn pod_labels(pod: &Pod) -> BTreeMap<String, String> {
 
     if let Some(owner) = controller_of(&pod.metadata) {
         if !owner.kind.is_empty() {
-            labels.insert(format!("{META_PREFIX}pod_controller_kind"), owner.kind.clone());
+            labels.insert(
+                format!("{META_PREFIX}pod_controller_kind"),
+                owner.kind.clone(),
+            );
         }
         if !owner.name.is_empty() {
-            labels.insert(format!("{META_PREFIX}pod_controller_name"), owner.name.clone());
+            labels.insert(
+                format!("{META_PREFIX}pod_controller_name"),
+                owner.name.clone(),
+            );
         }
     }
 
@@ -183,7 +216,10 @@ fn pod_labels(pod: &Pod) -> BTreeMap<String, String> {
 
 /// Container id from the matching status entry, empty when not found. Port of
 /// `findPodContainerID`.
-fn find_container_id(statuses: Option<&[k8s_openapi::api::core::v1::ContainerStatus]>, name: &str) -> String {
+fn find_container_id(
+    statuses: Option<&[k8s_openapi::api::core::v1::ContainerStatus]>,
+    name: &str,
+) -> String {
     statuses
         .into_iter()
         .flatten()
@@ -198,7 +234,9 @@ fn find_container_id(statuses: Option<&[k8s_openapi::api::core::v1::ContainerSta
 fn all_containers(pod: &Pod) -> Vec<(&Container, bool)> {
     let spec = pod.spec.as_ref();
     let regular = spec.map(|s| s.containers.as_slice()).unwrap_or_default();
-    let init = spec.and_then(|s| s.init_containers.as_deref()).unwrap_or_default();
+    let init = spec
+        .and_then(|s| s.init_containers.as_deref())
+        .unwrap_or_default();
     regular
         .iter()
         .map(|c| (c, false))
@@ -220,7 +258,11 @@ pub fn pod_target_groups(
     let mut groups = Vec::new();
 
     for pod in pods {
-        let pod_ip = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref()).unwrap_or("");
+        let pod_ip = pod
+            .status
+            .as_ref()
+            .and_then(|s| s.pod_ip.as_deref())
+            .unwrap_or("");
         // PodIP can be empty when a pod is starting or has been evicted.
         if pod_ip.is_empty() {
             continue;
@@ -258,10 +300,19 @@ pub fn pod_target_groups(
                 // No port: anonymous target at the pod IP, no port labels.
                 let mut labels = base.clone();
                 labels.insert(format!("{META_PREFIX}address"), pod_ip.to_owned());
-                labels.insert(format!("{META_PREFIX}pod_container_name"), container.name.clone());
-                labels.insert(format!("{META_PREFIX}pod_container_id"), container_id.clone());
+                labels.insert(
+                    format!("{META_PREFIX}pod_container_name"),
+                    container.name.clone(),
+                );
+                labels.insert(
+                    format!("{META_PREFIX}pod_container_id"),
+                    container_id.clone(),
+                );
                 labels.insert(format!("{META_PREFIX}pod_container_image"), image.clone());
-                labels.insert(format!("{META_PREFIX}pod_container_init"), is_init.to_string());
+                labels.insert(
+                    format!("{META_PREFIX}pod_container_init"),
+                    is_init.to_string(),
+                );
                 groups.push(single_target(labels));
                 continue;
             }
@@ -272,10 +323,19 @@ pub fn pod_target_groups(
 
                 let mut labels = base.clone();
                 labels.insert(format!("{META_PREFIX}address"), addr);
-                labels.insert(format!("{META_PREFIX}pod_container_name"), container.name.clone());
-                labels.insert(format!("{META_PREFIX}pod_container_id"), container_id.clone());
+                labels.insert(
+                    format!("{META_PREFIX}pod_container_name"),
+                    container.name.clone(),
+                );
+                labels.insert(
+                    format!("{META_PREFIX}pod_container_id"),
+                    container_id.clone(),
+                );
                 labels.insert(format!("{META_PREFIX}pod_container_image"), image.clone());
-                labels.insert(format!("{META_PREFIX}pod_container_port_number"), port_number);
+                labels.insert(
+                    format!("{META_PREFIX}pod_container_port_number"),
+                    port_number,
+                );
                 labels.insert(
                     format!("{META_PREFIX}pod_container_port_name"),
                     port.name.clone().unwrap_or_default(),
@@ -284,7 +344,10 @@ pub fn pod_target_groups(
                     format!("{META_PREFIX}pod_container_port_protocol"),
                     port.protocol.clone().unwrap_or_default(),
                 );
-                labels.insert(format!("{META_PREFIX}pod_container_init"), is_init.to_string());
+                labels.insert(
+                    format!("{META_PREFIX}pod_container_init"),
+                    is_init.to_string(),
+                );
                 groups.push(single_target(labels));
             }
         }
@@ -299,7 +362,10 @@ fn single_target(mut labels: BTreeMap<String, String>) -> TargetGroup {
     let address = labels
         .remove(&format!("{META_PREFIX}address"))
         .unwrap_or_default();
-    TargetGroup { targets: vec![address], labels }
+    TargetGroup {
+        targets: vec![address],
+        labels,
+    }
 }
 
 /// One target group per endpoint/port pair of every slice, joined with the
@@ -371,7 +437,11 @@ pub fn endpointslice_target_groups(
             let Some(pod) = pods.get(&(pod_ns.clone(), pod_name.clone())) else {
                 continue;
             };
-            let pod_ip = pod.status.as_ref().and_then(|s| s.pod_ip.as_deref()).unwrap_or("");
+            let pod_ip = pod
+                .status
+                .as_ref()
+                .and_then(|s| s.pod_ip.as_deref())
+                .unwrap_or("");
             if pod_ip.is_empty() {
                 continue;
             }
@@ -392,7 +462,10 @@ pub fn endpointslice_target_groups(
                         labels.insert(key.clone(), value.clone());
                     }
                     labels.insert(format!("{META_PREFIX}address"), addr);
-                    labels.insert(format!("{META_PREFIX}pod_container_name"), container.name.clone());
+                    labels.insert(
+                        format!("{META_PREFIX}pod_container_name"),
+                        container.name.clone(),
+                    );
                     labels.insert(
                         format!("{META_PREFIX}pod_container_image"),
                         container.image.clone().unwrap_or_default(),
@@ -401,12 +474,18 @@ pub fn endpointslice_target_groups(
                         format!("{META_PREFIX}pod_container_port_name"),
                         cport.name.clone().unwrap_or_default(),
                     );
-                    labels.insert(format!("{META_PREFIX}pod_container_port_number"), port_number);
+                    labels.insert(
+                        format!("{META_PREFIX}pod_container_port_number"),
+                        port_number,
+                    );
                     labels.insert(
                         format!("{META_PREFIX}pod_container_port_protocol"),
                         cport.protocol.clone().unwrap_or_default(),
                     );
-                    labels.insert(format!("{META_PREFIX}pod_container_init"), is_init.to_string());
+                    labels.insert(
+                        format!("{META_PREFIX}pod_container_init"),
+                        is_init.to_string(),
+                    );
                     groups.push(single_target(labels));
                 }
             }
@@ -439,13 +518,22 @@ fn build_endpoint_target(
     labels.insert(format!("{META_PREFIX}address"), address);
 
     if let Some(name) = &port.name {
-        labels.insert(format!("{META_PREFIX}endpointslice_port_name"), name.clone());
+        labels.insert(
+            format!("{META_PREFIX}endpointslice_port_name"),
+            name.clone(),
+        );
     }
     if let Some(protocol) = &port.protocol {
-        labels.insert(format!("{META_PREFIX}endpointslice_port_protocol"), protocol.clone());
+        labels.insert(
+            format!("{META_PREFIX}endpointslice_port_protocol"),
+            protocol.clone(),
+        );
     }
     if let Some(number) = port.port {
-        labels.insert(format!("{META_PREFIX}endpointslice_port"), number.to_string());
+        labels.insert(
+            format!("{META_PREFIX}endpointslice_port"),
+            number.to_string(),
+        );
     }
     if let Some(app_protocol) = &port.app_protocol {
         labels.insert(
@@ -476,7 +564,10 @@ fn build_endpoint_target(
     }
 
     if let Some(hostname) = &endpoint.hostname {
-        labels.insert(format!("{META_PREFIX}endpointslice_endpoint_hostname"), hostname.clone());
+        labels.insert(
+            format!("{META_PREFIX}endpointslice_endpoint_hostname"),
+            hostname.clone(),
+        );
     }
 
     if let Some(target_ref) = &endpoint.target_ref {
@@ -491,10 +582,16 @@ fn build_endpoint_target(
     }
 
     if let Some(node_name) = &endpoint.node_name {
-        labels.insert(format!("{META_PREFIX}endpointslice_endpoint_node_name"), node_name.clone());
+        labels.insert(
+            format!("{META_PREFIX}endpointslice_endpoint_node_name"),
+            node_name.clone(),
+        );
     }
     if let Some(zone) = &endpoint.zone {
-        labels.insert(format!("{META_PREFIX}endpointslice_endpoint_zone"), zone.clone());
+        labels.insert(
+            format!("{META_PREFIX}endpointslice_endpoint_zone"),
+            zone.clone(),
+        );
     }
 
     if let Some(topology) = &endpoint.deprecated_topology {
@@ -551,7 +648,10 @@ fn build_endpoint_target(
         'outer: for (container, is_init) in all_containers(pod) {
             for cport in container.ports.as_deref().unwrap_or_default() {
                 if cport.container_port == port_number {
-                    labels.insert(format!("{META_PREFIX}pod_container_name"), container.name.clone());
+                    labels.insert(
+                        format!("{META_PREFIX}pod_container_name"),
+                        container.name.clone(),
+                    );
                     labels.insert(
                         format!("{META_PREFIX}pod_container_image"),
                         container.image.clone().unwrap_or_default(),
@@ -568,7 +668,10 @@ fn build_endpoint_target(
                         format!("{META_PREFIX}pod_container_port_protocol"),
                         cport.protocol.clone().unwrap_or_default(),
                     );
-                    labels.insert(format!("{META_PREFIX}pod_container_init"), is_init.to_string());
+                    labels.insert(
+                        format!("{META_PREFIX}pod_container_init"),
+                        is_init.to_string(),
+                    );
                     break 'outer;
                 }
             }
@@ -581,15 +684,21 @@ fn build_endpoint_target(
 
 #[cfg(test)]
 mod tests {
-    use k8s_openapi::api::core::v1::ContainerPort;
-    use k8s_openapi::api::core::v1::ContainerStatus;
-    use k8s_openapi::api::core::v1::PodCondition;
-    use k8s_openapi::api::core::v1::PodSpec;
-    use k8s_openapi::api::core::v1::PodStatus;
-    use k8s_openapi::api::core::v1::ServiceSpec;
-    use k8s_openapi::api::discovery::v1::EndpointConditions;
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-    use k8s_openapi::api::core::v1::ObjectReference;
+    use k8s_openapi::{
+        api::{
+            core::v1::{
+                ContainerPort,
+                ContainerStatus,
+                ObjectReference,
+                PodCondition,
+                PodSpec,
+                PodStatus,
+                ServiceSpec,
+            },
+            discovery::v1::EndpointConditions,
+        },
+        apimachinery::pkg::apis::meta::v1::OwnerReference,
+    };
 
     use super::*;
 
@@ -612,7 +721,10 @@ mod tests {
     }
 
     fn labels_map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect()
     }
 
     /// Pod: 2 labels (one dotted key), 1 annotation, a controller owner ref,
@@ -647,7 +759,11 @@ mod tests {
                     ),
                     container("sidecar", "side:1", vec![]),
                 ],
-                init_containers: Some(vec![container("init", "init:1", vec![port("boot", 7000, "TCP")])]),
+                init_containers: Some(vec![container(
+                    "init",
+                    "init:1",
+                    vec![port("boot", 7000, "TCP")],
+                )]),
                 ..Default::default()
             }),
             status: Some(PodStatus {
@@ -696,14 +812,26 @@ mod tests {
         assert_eq!(l[&format!("{META_PREFIX}pod_node_name")], "node-a");
         assert_eq!(l[&format!("{META_PREFIX}pod_host_ip")], "192.168.1.1");
         assert_eq!(l[&format!("{META_PREFIX}pod_uid")], "uid-123");
-        assert_eq!(l[&format!("{META_PREFIX}pod_controller_kind")], "ReplicaSet");
+        assert_eq!(
+            l[&format!("{META_PREFIX}pod_controller_kind")],
+            "ReplicaSet"
+        );
         assert_eq!(l[&format!("{META_PREFIX}pod_controller_name")], "web");
         assert_eq!(l[&format!("{META_PREFIX}pod_container_name")], "app");
-        assert_eq!(l[&format!("{META_PREFIX}pod_container_id")], "containerd://abc");
+        assert_eq!(
+            l[&format!("{META_PREFIX}pod_container_id")],
+            "containerd://abc"
+        );
         assert_eq!(l[&format!("{META_PREFIX}pod_container_image")], "app:1");
         assert_eq!(l[&format!("{META_PREFIX}pod_container_port_name")], "http");
-        assert_eq!(l[&format!("{META_PREFIX}pod_container_port_number")], "8080");
-        assert_eq!(l[&format!("{META_PREFIX}pod_container_port_protocol")], "TCP");
+        assert_eq!(
+            l[&format!("{META_PREFIX}pod_container_port_number")],
+            "8080"
+        );
+        assert_eq!(
+            l[&format!("{META_PREFIX}pod_container_port_protocol")],
+            "TCP"
+        );
         assert_eq!(l[&format!("{META_PREFIX}pod_container_init")], "false");
     }
 
@@ -712,10 +840,19 @@ mod tests {
         let pod = Arc::new(sample_pod());
         let groups = pod_target_groups(&[pod], None);
         let l = &find(&groups, "10.0.0.5:8080").labels;
-        assert_eq!(l[&format!("{META_PREFIX}pod_label_app_kubernetes_io_name")], "web");
-        assert_eq!(l[&format!("{META_PREFIX}pod_labelpresent_app_kubernetes_io_name")], "true");
+        assert_eq!(
+            l[&format!("{META_PREFIX}pod_label_app_kubernetes_io_name")],
+            "web"
+        );
+        assert_eq!(
+            l[&format!("{META_PREFIX}pod_labelpresent_app_kubernetes_io_name")],
+            "true"
+        );
         assert_eq!(l[&format!("{META_PREFIX}pod_label_tier")], "frontend");
-        assert_eq!(l[&format!("{META_PREFIX}pod_annotation_prometheus_io_scrape")], "true");
+        assert_eq!(
+            l[&format!("{META_PREFIX}pod_annotation_prometheus_io_scrape")],
+            "true"
+        );
         assert_eq!(
             l[&format!("{META_PREFIX}pod_annotationpresent_prometheus_io_scrape")],
             "true"
@@ -727,9 +864,15 @@ mod tests {
         let pod = Arc::new(sample_pod());
         let groups = pod_target_groups(&[pod], None);
         let g = find(&groups, "10.0.0.5");
-        assert_eq!(g.labels[&format!("{META_PREFIX}pod_container_name")], "sidecar");
+        assert_eq!(
+            g.labels[&format!("{META_PREFIX}pod_container_name")],
+            "sidecar"
+        );
         // No port labels for a portless container.
-        assert!(!g.labels.contains_key(&format!("{META_PREFIX}pod_container_port_number")));
+        assert!(
+            !g.labels
+                .contains_key(&format!("{META_PREFIX}pod_container_port_number"))
+        );
     }
 
     #[test]
@@ -737,8 +880,14 @@ mod tests {
         let pod = Arc::new(sample_pod());
         let groups = pod_target_groups(&[pod], None);
         let g = find(&groups, "10.0.0.5:7000");
-        assert_eq!(g.labels[&format!("{META_PREFIX}pod_container_name")], "init");
-        assert_eq!(g.labels[&format!("{META_PREFIX}pod_container_init")], "true");
+        assert_eq!(
+            g.labels[&format!("{META_PREFIX}pod_container_name")],
+            "init"
+        );
+        assert_eq!(
+            g.labels[&format!("{META_PREFIX}pod_container_init")],
+            "true"
+        );
         // Init container has no status entry, so container id is empty.
         assert_eq!(g.labels[&format!("{META_PREFIX}pod_container_id")], "");
     }
@@ -756,7 +905,11 @@ mod tests {
         let mut pod = sample_pod();
         pod.status.as_mut().unwrap().pod_ip = Some("fd00::1".to_owned());
         let groups = pod_target_groups(&[Arc::new(pod)], None);
-        assert!(groups.iter().any(|g| g.targets == ["[fd00::1]:8080".to_owned()]));
+        assert!(
+            groups
+                .iter()
+                .any(|g| g.targets == ["[fd00::1]:8080".to_owned()])
+        );
     }
 
     #[test]
@@ -775,7 +928,10 @@ mod tests {
         let groups = pod_target_groups(std::slice::from_ref(&pod), Some(&nodes));
         let l = &find(&groups, "10.0.0.5:8080").labels;
         assert_eq!(l[&format!("{META_PREFIX}node_name")], "node-a");
-        assert_eq!(l[&format!("{META_PREFIX}node_label_topology_kubernetes_io_zone")], "eu-1");
+        assert_eq!(
+            l[&format!("{META_PREFIX}node_label_topology_kubernetes_io_zone")],
+            "eu-1"
+        );
 
         // A pod on a node absent from the store is dropped entirely.
         let empty: HashMap<String, Arc<Node>> = HashMap::new();
@@ -850,53 +1006,94 @@ mod tests {
     type PodMap = HashMap<(String, String), Arc<Pod>>;
 
     fn slice_inputs() -> (ServiceMap, PodMap) {
-        let services = [(("default".to_owned(), "web".to_owned()), Arc::new(sample_service()))]
-            .into_iter()
-            .collect();
-        let pods = [(("default".to_owned(), "web-0".to_owned()), Arc::new(sample_pod()))]
-            .into_iter()
-            .collect();
+        let services = [(
+            ("default".to_owned(), "web".to_owned()),
+            Arc::new(sample_service()),
+        )]
+        .into_iter()
+        .collect();
+        let pods = [(
+            ("default".to_owned(), "web-0".to_owned()),
+            Arc::new(sample_pod()),
+        )]
+        .into_iter()
+        .collect();
         (services, pods)
     }
 
     #[test]
     fn endpointslice_core_labels() {
         let (services, pods) = slice_inputs();
-        let groups = endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &pods, None);
+        let groups =
+            endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &pods, None);
 
         let g = find(&groups, "10.0.0.5:8080");
         let l = &g.labels;
         assert_eq!(l[&format!("{META_PREFIX}namespace")], "default");
         assert_eq!(l[&format!("{META_PREFIX}endpointslice_name")], "web-abcde");
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_address_type")], "IPv4");
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_address_type")],
+            "IPv4"
+        );
         assert_eq!(l[&format!("{META_PREFIX}endpointslice_port_name")], "http");
         assert_eq!(l[&format!("{META_PREFIX}endpointslice_port")], "8080");
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_port_protocol")], "TCP");
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_endpoint_conditions_ready")], "true");
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_endpoint_conditions_serving")], "true");
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_port_protocol")],
+            "TCP"
+        );
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_endpoint_conditions_ready")],
+            "true"
+        );
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_endpoint_conditions_serving")],
+            "true"
+        );
         // Terminating condition was nil, so its label is absent.
-        assert!(!l.contains_key(&format!("{META_PREFIX}endpointslice_endpoint_conditions_terminating")));
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_endpoint_hostname")], "web-0");
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_endpoint_node_name")], "node-a");
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_endpoint_zone")], "eu-1");
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_address_target_kind")], "Pod");
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_address_target_name")], "web-0");
+        assert!(!l.contains_key(&format!(
+            "{META_PREFIX}endpointslice_endpoint_conditions_terminating"
+        )));
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_endpoint_hostname")],
+            "web-0"
+        );
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_endpoint_node_name")],
+            "node-a"
+        );
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_endpoint_zone")],
+            "eu-1"
+        );
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_address_target_kind")],
+            "Pod"
+        );
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_address_target_name")],
+            "web-0"
+        );
     }
 
     #[test]
     fn endpointslice_service_labels() {
         let (services, pods) = slice_inputs();
-        let groups = endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &pods, None);
+        let groups =
+            endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &pods, None);
         let l = &find(&groups, "10.0.0.5:8080").labels;
         assert_eq!(l[&format!("{META_PREFIX}service_name")], "web");
         assert_eq!(l[&format!("{META_PREFIX}service_label_team")], "core");
-        assert_eq!(l[&format!("{META_PREFIX}service_labelpresent_team")], "true");
+        assert_eq!(
+            l[&format!("{META_PREFIX}service_labelpresent_team")],
+            "true"
+        );
     }
 
     #[test]
     fn endpointslice_pod_join_and_container_port() {
         let (services, pods) = slice_inputs();
-        let groups = endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &pods, None);
+        let groups =
+            endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &pods, None);
         let l = &find(&groups, "10.0.0.5:8080").labels;
         // Full pod label set is merged in.
         assert_eq!(l[&format!("{META_PREFIX}pod_name")], "web-0");
@@ -905,20 +1102,33 @@ mod tests {
         // Container matched by port number 8080.
         assert_eq!(l[&format!("{META_PREFIX}pod_container_name")], "app");
         assert_eq!(l[&format!("{META_PREFIX}pod_container_port_name")], "http");
-        assert_eq!(l[&format!("{META_PREFIX}pod_container_port_number")], "8080");
+        assert_eq!(
+            l[&format!("{META_PREFIX}pod_container_port_number")],
+            "8080"
+        );
         assert_eq!(l[&format!("{META_PREFIX}pod_container_init")], "false");
     }
 
     #[test]
     fn endpointslice_adds_additional_pod_ports() {
         let (services, pods) = slice_inputs();
-        let groups = endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &pods, None);
+        let groups =
+            endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &pods, None);
         // Slice only covered 8080; the pod's 9090 and init 7000 are added.
         let extra = find(&groups, "10.0.0.5:9090");
-        assert_eq!(extra.labels[&format!("{META_PREFIX}pod_container_port_name")], "metrics");
+        assert_eq!(
+            extra.labels[&format!("{META_PREFIX}pod_container_port_name")],
+            "metrics"
+        );
         // Additional ports carry no endpoint labels.
-        assert!(!extra.labels.contains_key(&format!("{META_PREFIX}endpointslice_endpoint_conditions_ready")));
-        assert!(groups.iter().any(|g| g.targets == ["10.0.0.5:7000".to_owned()]));
+        assert!(!extra.labels.contains_key(&format!(
+            "{META_PREFIX}endpointslice_endpoint_conditions_ready"
+        )));
+        assert!(
+            groups
+                .iter()
+                .any(|g| g.targets == ["10.0.0.5:7000".to_owned()])
+        );
     }
 
     #[test]
@@ -942,7 +1152,10 @@ mod tests {
             endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &empty_pods, None);
         let l = &find(&groups, "10.0.0.5:8080").labels;
         // Endpoint/service labels present, pod labels absent.
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_address_target_name")], "web-0");
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_address_target_name")],
+            "web-0"
+        );
         assert_eq!(l[&format!("{META_PREFIX}service_name")], "web");
         assert!(!l.contains_key(&format!("{META_PREFIX}pod_name")));
     }
@@ -950,10 +1163,16 @@ mod tests {
     #[test]
     fn endpointslice_second_endpoint_condition_only_when_present() {
         let (services, pods) = slice_inputs();
-        let groups = endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &pods, None);
+        let groups =
+            endpointslice_target_groups(&[Arc::new(sample_slice())], &services, &pods, None);
         let l = &find(&groups, "10.0.0.6:8080").labels;
-        assert_eq!(l[&format!("{META_PREFIX}endpointslice_endpoint_conditions_ready")], "false");
-        assert!(!l.contains_key(&format!("{META_PREFIX}endpointslice_endpoint_conditions_serving")));
+        assert_eq!(
+            l[&format!("{META_PREFIX}endpointslice_endpoint_conditions_ready")],
+            "false"
+        );
+        assert!(!l.contains_key(&format!(
+            "{META_PREFIX}endpointslice_endpoint_conditions_serving"
+        )));
         // No targetRef on this endpoint, so no pod labels.
         assert!(!l.contains_key(&format!("{META_PREFIX}pod_name")));
     }

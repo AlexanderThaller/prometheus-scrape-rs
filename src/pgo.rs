@@ -5,15 +5,23 @@
 //! config parsing — so an instrumented build can collect a representative
 //! profile without network access. Used by the two-phase container build.
 
-use std::fmt::Write as _;
-use std::hash::Hasher as _;
-use std::io::Write as _;
-use std::path::Path;
+use std::{
+    fmt::Write as _,
+    hash::Hasher as _,
+    io::Write as _,
+    path::Path,
+};
 
 use prost::Message as _;
 
-use crate::model::{Label, WriteRequest, sort_labels};
-use crate::relabel::RelabelConfig;
+use crate::{
+    model::{
+        Label,
+        WriteRequest,
+        sort_labels,
+    },
+    relabel::RelabelConfig,
+};
 
 /// Total bytes of exposition text to push through the pipeline; roughly ten
 /// seconds of training on one core.
@@ -98,7 +106,10 @@ pub fn run_training_workload(corpus_dir: Option<&Path>) -> anyhow::Result<()> {
 
     // Print the checksum so the whole workload is observably used and the
     // optimizer cannot discard it.
-    note(&format!("pgo training done, checksum {:x}", checksum.0.finish()));
+    note(&format!(
+        "pgo training done, checksum {:x}",
+        checksum.0.finish()
+    ));
     Ok(())
 }
 
@@ -107,7 +118,10 @@ pub fn run_training_workload(corpus_dir: Option<&Path>) -> anyhow::Result<()> {
 /// fail because one collected sample is stale or malformed.
 fn load_corpus(dir: &Path) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
-        note(&format!("pgo corpus directory {} not readable", dir.display()));
+        note(&format!(
+            "pgo corpus directory {} not readable",
+            dir.display()
+        ));
         return Vec::new();
     };
     let mut bodies = Vec::new();
@@ -123,7 +137,10 @@ fn load_corpus(dir: &Path) -> Vec<String> {
                 if crate::parser::parse(&body, 0, true).is_ok() {
                     bodies.push(body);
                 } else {
-                    note(&format!("pgo corpus {} does not parse; skipped", path.display()));
+                    note(&format!(
+                        "pgo corpus {} does not parse; skipped",
+                        path.display()
+                    ));
                 }
             }
             Ok(_) => note(&format!("pgo corpus {} is empty; skipped", path.display())),
@@ -142,7 +159,8 @@ fn training_scrape_body(series: usize) -> String {
     for i in 0..series / 2 {
         let _ = writeln!(
             body,
-            "http_requests_total{{method=\"GET\",code=\"200\",path=\"/api/v1/resource/{i}\",handler=\"h{}\"}} {}",
+            "http_requests_total{{method=\"GET\",code=\"200\",path=\"/api/v1/resource/{i}\",\
+             handler=\"h{}\"}} {}",
             i % 97,
             i * 3 + 1
         );

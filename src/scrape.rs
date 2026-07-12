@@ -338,7 +338,12 @@ async fn scrape_loop(
             (Some(previous), Some(message)) => {
                 failures += 1;
                 if previous == message {
-                    debug!(url = target.url, error = message, failures, "target still failing");
+                    debug!(
+                        url = target.url,
+                        error = message,
+                        failures,
+                        "target still failing"
+                    );
                 } else {
                     warn!(
                         url = target.url,
@@ -842,8 +847,7 @@ mod tests {
         parsed
             .into_iter()
             .filter_map(|mut single| {
-                let labels =
-                    finalize_series_labels(std::mem::take(&mut single.labels), target)?;
+                let labels = finalize_series_labels(std::mem::take(&mut single.labels), target)?;
                 single.labels = labels;
                 Some(single)
             })

@@ -10,24 +10,50 @@
 
 pub mod targets;
 
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::sync::Arc;
-use std::time::Duration;
+use std::{
+    collections::HashMap,
+    fmt::Debug,
+    sync::Arc,
+    time::Duration,
+};
 
 use futures::StreamExt as _;
-use k8s_openapi::api::core::v1::{Node, Pod, Service};
-use k8s_openapi::api::discovery::v1::EndpointSlice;
-use kube::api::Api;
-use kube::runtime::reflector::{self, Store};
-use kube::runtime::watcher;
+use k8s_openapi::api::{
+    core::v1::{
+        Node,
+        Pod,
+        Service,
+    },
+    discovery::v1::EndpointSlice,
+};
+use kube::{
+    api::Api,
+    runtime::{
+        reflector::{
+            self,
+            Store,
+        },
+        watcher,
+    },
+};
 use serde::de::DeserializeOwned;
-use tokio::sync::mpsc;
-use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tokio::{
+    sync::mpsc,
+    task::JoinHandle,
+};
+use tracing::{
+    debug,
+    info,
+    warn,
+};
 
-use crate::config::{KubernetesRole, KubernetesSdConfig};
-use crate::sd::TargetGroup;
+use crate::{
+    config::{
+        KubernetesRole,
+        KubernetesSdConfig,
+    },
+    sd::TargetGroup,
+};
 
 /// Quiet period after a watch event before target groups are rebuilt, so
 /// bursts (initial sync, rollouts) collapse into one update.
@@ -79,8 +105,11 @@ pub async fn run(
     let mut slice_stores: Vec<Store<EndpointSlice>> = Vec::new();
     let mut service_stores: Vec<Store<Service>> = Vec::new();
     for namespace in &namespaces {
-        let (store, task) =
-            watch_resource(scoped_api::<Pod>(&client, namespace.as_deref()), &job, &notify_tx);
+        let (store, task) = watch_resource(
+            scoped_api::<Pod>(&client, namespace.as_deref()),
+            &job,
+            &notify_tx,
+        );
         pod_stores.push(store);
         watch_tasks.push(task);
         if config.role == KubernetesRole::Endpointslice {
@@ -101,8 +130,7 @@ pub async fn run(
         }
     }
     let node_store: Option<Store<Node>> = if config.attach_metadata.node {
-        let (store, task) =
-            watch_resource(Api::<Node>::all(client.clone()), &job, &notify_tx);
+        let (store, task) = watch_resource(Api::<Node>::all(client.clone()), &job, &notify_tx);
         watch_tasks.push(task);
         Some(store)
     } else {
@@ -125,7 +153,13 @@ pub async fn run(
     info!(job, role = ?config.role, namespaces = namespaces.len(), "kubernetes_sd synced");
 
     loop {
-        let groups = build(config.role, &pod_stores, &slice_stores, &service_stores, node_store.as_ref());
+        let groups = build(
+            config.role,
+            &pod_stores,
+            &slice_stores,
+            &service_stores,
+            node_store.as_ref(),
+        );
         debug!(job, groups = groups.len(), "kubernetes_sd targets rebuilt");
         if update.send((slot, groups)).await.is_err() {
             break; // merger is gone; shutting down
@@ -217,15 +251,13 @@ where
 
 /// Start a reflector for one resource kind. Watch errors (RBAC,
 /// connectivity) are logged and retried with a fixed pause.
-fn watch_resource<K>(api: Api<K>, job: &str, notify: &mpsc::Sender<()>) -> (Store<K>, JoinHandle<()>)
+fn watch_resource<K>(
+    api: Api<K>,
+    job: &str,
+    notify: &mpsc::Sender<()>,
+) -> (Store<K>, JoinHandle<()>)
 where
-    K: kube::Resource<DynamicType = ()>
-        + Clone
-        + DeserializeOwned
-        + Debug
-        + Send
-        + Sync
-        + 'static,
+    K: kube::Resource<DynamicType = ()> + Clone + DeserializeOwned + Debug + Send + Sync + 'static,
 {
     let kind = K::kind(&()).to_string();
     let job = job.to_owned();

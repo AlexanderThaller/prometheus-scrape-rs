@@ -258,7 +258,10 @@ remote_write:
 
     let marker = marker.ok_or_else(|| anyhow::anyhow!("no staleness marker within 20s"))?;
     assert!(
-        marker.labels.iter().any(|l| l.name == "job" && l.value == "staleness"),
+        marker
+            .labels
+            .iter()
+            .any(|l| l.name == "job" && l.value == "staleness"),
         "marker must carry target labels: {:?}",
         marker.labels
     );
@@ -287,7 +290,9 @@ fn remote_write_v2_delivers_symbolized_series() -> anyhow::Result<()> {
             let mut raw = Vec::new();
             let mut buf = [0u8; 4096];
             let body = loop {
-                let Ok(n) = stream.read(&mut buf) else { break Vec::new() };
+                let Ok(n) = stream.read(&mut buf) else {
+                    break Vec::new();
+                };
                 raw.extend_from_slice(&buf[..n]);
                 if let Some(header_end) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
                     let headers = String::from_utf8_lossy(&raw[..header_end]).to_lowercase();
@@ -319,8 +324,8 @@ fn remote_write_v2_delivers_symbolized_series() -> anyhow::Result<()> {
             let decompressed = snap::raw::Decoder::new()
                 .decompress_vec(&body)
                 .expect("body must be snappy compressed");
-            let request = WriteRequestV2::decode(decompressed.as_slice())
-                .expect("body must be a v2 Request");
+            let request =
+                WriteRequestV2::decode(decompressed.as_slice()).expect("body must be a v2 Request");
             let _ = tx.send(request);
         }
     });
@@ -369,7 +374,9 @@ remote_write:
             .map(|pair| (symbol(pair[0]), symbol(pair[1])))
             .collect();
         assert!(
-            labels.iter().any(|(name, value)| *name == "job" && *value == "v2"),
+            labels
+                .iter()
+                .any(|(name, value)| *name == "job" && *value == "v2"),
             "series must carry the job label: {labels:?}"
         );
         if labels

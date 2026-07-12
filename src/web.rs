@@ -12,17 +12,39 @@
 //! The server is hand-rolled on a `TcpListener`: probe traffic is a handful
 //! of tiny GET requests per second, not worth an HTTP framework dependency.
 
-use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::{
+    net::SocketAddr,
+    sync::{
+        Arc,
+        atomic::{
+            AtomicBool,
+            Ordering,
+        },
+    },
+    time::Duration,
+};
 
 use anyhow::Context as _;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{mpsc, oneshot};
-use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tokio::{
+    io::{
+        AsyncReadExt as _,
+        AsyncWriteExt as _,
+    },
+    net::{
+        TcpListener,
+        TcpStream,
+    },
+    sync::{
+        mpsc,
+        oneshot,
+    },
+    task::JoinHandle,
+};
+use tracing::{
+    debug,
+    info,
+    warn,
+};
 
 /// Shared readiness flag; flipped by the main loop.
 #[derive(Debug, Default)]
@@ -56,7 +78,9 @@ pub async fn serve(
     let listener = TcpListener::bind(listen_address)
         .await
         .with_context(|| format!("binding web listen address {listen_address}"))?;
-    let local_addr = listener.local_addr().context("resolving web listen address")?;
+    let local_addr = listener
+        .local_addr()
+        .context("resolving web listen address")?;
     info!(address = %local_addr, lifecycle = lifecycle.is_some(), "web endpoint listening");
 
     let handle = tokio::spawn(async move {
@@ -108,16 +132,12 @@ async fn handle_connection(
         .unwrap_or("");
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
-    let path = parts
-        .next()
-        .unwrap_or("")
-        .split('?')
-        .next()
-        .unwrap_or("");
+    let path = parts.next().unwrap_or("").split('?').next().unwrap_or("");
 
     let (status, body) = route(method, path, state, lifecycle).await;
     let response = format!(
-        "HTTP/1.1 {status}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\ncontent-type: text/plain; charset=utf-8\r\ncontent-length: \
+         {}\r\nconnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(response.as_bytes()).await?;
@@ -141,11 +161,20 @@ async fn route(
             }
         }
         ("POST" | "PUT", "/-/reload") => {
-            lifecycle_request(lifecycle, LifecycleCommand::Reload, "Configuration reloaded.\n")
-                .await
+            lifecycle_request(
+                lifecycle,
+                LifecycleCommand::Reload,
+                "Configuration reloaded.\n",
+            )
+            .await
         }
         ("POST" | "PUT", "/-/quit") => {
-            lifecycle_request(lifecycle, LifecycleCommand::Quit, "Requesting termination.\n").await
+            lifecycle_request(
+                lifecycle,
+                LifecycleCommand::Quit,
+                "Requesting termination.\n",
+            )
+            .await
         }
         ("GET" | "HEAD", "/-/reload" | "/-/quit") => (
             "405 Method Not Allowed",
@@ -245,8 +274,7 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_round_trips_to_handler() -> anyhow::Result<()> {
         let (tx, mut rx) = mpsc::channel(1);
-        let (addr, _server) =
-            serve("127.0.0.1:0", Arc::new(WebState::default()), Some(tx)).await?;
+        let (addr, _server) = serve("127.0.0.1:0", Arc::new(WebState::default()), Some(tx)).await?;
 
         let handler = tokio::spawn(async move {
             let first = rx.recv().await.expect("must receive reload");
