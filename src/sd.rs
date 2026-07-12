@@ -67,7 +67,7 @@ pub fn watch(config: &ScrapeConfig) -> (watch::Receiver<Vec<TargetGroup>>, Vec<J
                 .iter()
                 .map(|c| c.refresh_interval.as_duration())
                 .min()
-                .unwrap_or(std::time::Duration::from_secs(300));
+                .unwrap_or(std::time::Duration::from_mins(5));
             let mut ticker = tokio::time::interval(refresh);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {

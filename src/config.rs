@@ -867,7 +867,7 @@ scrape_configs:
         assert!(scrape.metric_relabel_configs.is_empty());
         assert!(!scrape.tls_config.insecure_skip_verify);
 
-        assert_eq!(scrape.interval(&config.global), Duration::from_secs(60));
+        assert_eq!(scrape.interval(&config.global), Duration::from_mins(1));
         assert_eq!(scrape.timeout(&config.global), Duration::from_secs(10));
 
         assert!(config.remote_write.is_empty());
