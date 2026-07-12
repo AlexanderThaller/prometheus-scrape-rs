@@ -406,7 +406,7 @@ fn parse_label_value(
     open: usize,
     end: usize,
     line_no: usize,
-) -> Result<(String, usize), ParseError> {
+) -> Result<(compact_str::CompactString, usize), ParseError> {
     let bytes = body.as_bytes();
     debug_assert_eq!(bytes[open], b'"');
     let content_start = open + 1;
@@ -441,7 +441,8 @@ fn parse_label_value(
 
     if !has_escape {
         let s = utf8_from(body, content_start, close, line_no)?;
-        return Ok((s.to_owned(), close + 1));
+        // Values up to 24 bytes are stored inline — no allocation.
+        return Ok((compact_str::CompactString::from(s), close + 1));
     }
 
     // Slow path: decode escapes.
@@ -478,7 +479,7 @@ fn parse_label_value(
         }
     }
 
-    Ok((decoded, close + 1))
+    Ok((decoded.into(), close + 1))
 }
 
 /// Parse a metric value. Handles a leading `+` (e.g. `+Inf`); otherwise defers

@@ -25,6 +25,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 memchr = "2"
+compact_str = "0.9"
 
 [lints.rust]
 #missing-docs = "warn"

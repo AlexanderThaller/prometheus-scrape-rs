@@ -5,6 +5,8 @@
 //! protocol). Only the fields required for writing samples are included;
 //! metadata and exemplars are intentionally omitted to keep payloads small.
 
+use compact_str::CompactString;
+
 /// Reserved label name carrying the metric name.
 pub const METRIC_NAME_LABEL: &str = "__name__";
 
@@ -23,20 +25,77 @@ pub const fn is_stale_nan(value: f64) -> bool {
     value.to_bits() == STALE_NAN_BITS
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord, prost::Message)]
+/// A label pair backed by [`CompactString`]: strings up to 24 bytes live
+/// inline (no allocation, no refcount), longer ones on the heap like a
+/// `String`. Clones are plain memcpys — unlike the reverted shared-`Bytes`
+/// labels there is no atomic refcount to contend on across scrape tasks.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Label {
-    #[prost(string, tag = "1")]
-    pub name: String,
-    #[prost(string, tag = "2")]
-    pub value: String,
+    pub name: CompactString,
+    pub value: CompactString,
 }
 
 impl Label {
-    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Self {
+    pub fn new(name: impl Into<CompactString>, value: impl Into<CompactString>) -> Self {
         Self {
             name: name.into(),
             value: value.into(),
         }
+    }
+}
+
+/// Hand-written `prost::Message` so `TimeSeries`/`WriteRequest` can keep
+/// their derives on top of the `CompactString` fields. Wire-compatible with
+/// the former `#[prost(string, tag = "1"/"2")]` definition; only the decode
+/// path allocates a transient `String`.
+impl prost::Message for Label {
+    fn encode_raw(&self, buf: &mut impl bytes::BufMut) {
+        use prost::encoding::{
+            WireType,
+            encode_key,
+            encode_varint,
+        };
+        if !self.name.is_empty() {
+            encode_key(1, WireType::LengthDelimited, buf);
+            encode_varint(self.name.len() as u64, buf);
+            buf.put_slice(self.name.as_bytes());
+        }
+        if !self.value.is_empty() {
+            encode_key(2, WireType::LengthDelimited, buf);
+            encode_varint(self.value.len() as u64, buf);
+            buf.put_slice(self.value.as_bytes());
+        }
+    }
+
+    fn merge_field(
+        &mut self,
+        tag: u32,
+        wire_type: prost::encoding::WireType,
+        buf: &mut impl bytes::Buf,
+        ctx: prost::encoding::DecodeContext,
+    ) -> Result<(), prost::DecodeError> {
+        match tag {
+            1 | 2 => {
+                let mut text = String::new();
+                prost::encoding::string::merge(wire_type, &mut text, buf, ctx)?;
+                if tag == 1 {
+                    self.name = text.into();
+                } else {
+                    self.value = text.into();
+                }
+                Ok(())
+            }
+            _ => prost::encoding::skip_field(wire_type, tag, buf, ctx),
+        }
+    }
+
+    fn encoded_len(&self) -> usize {
+        string_field_len(&self.name) + string_field_len(&self.value)
+    }
+
+    fn clear(&mut self) {
+        self.name.clear();
+        self.value.clear();
     }
 }
 
@@ -280,6 +339,14 @@ mod tests {
         let mut buf = Vec::new();
         request.encode_into(&mut buf);
         assert_eq!(buf, request.encode_to_vec());
+    }
+
+    /// The bytes-labels experiment showed `Label` size directly moves the
+    /// hot paths (48 → 64 bytes was part of its regression). CompactString
+    /// keeps parity with the two former `String`s.
+    #[test]
+    fn label_stays_48_bytes() {
+        assert_eq!(std::mem::size_of::<Label>(), 48);
     }
 
     #[test]

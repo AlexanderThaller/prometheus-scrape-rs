@@ -257,7 +257,7 @@ fn build_targets(
             let mut params: Vec<(String, String)> = Vec::new();
             for label in &labels {
                 if let Some(param) = label.name.strip_prefix("__param_") {
-                    params.push((param.to_owned(), label.value.clone()));
+                    params.push((param.to_owned(), label.value.to_string()));
                 }
             }
             add_if_absent(&mut labels, "instance", &address);
@@ -754,7 +754,8 @@ fn get_label<'a>(labels: &'a [Label], name: &str) -> &'a str {
         .map_or("", |label| label.value.as_str())
 }
 
-fn set_label(labels: &mut Vec<Label>, name: &str, value: String) {
+fn set_label(labels: &mut Vec<Label>, name: &str, value: impl Into<compact_str::CompactString>) {
+    let value = value.into();
     if let Some(existing) = labels.iter_mut().find(|label| label.name == name) {
         existing.value = value;
     } else {

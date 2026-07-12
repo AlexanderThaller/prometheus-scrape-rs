@@ -144,15 +144,36 @@ labels are untouched — pod annotations become
 MiB at cluster pod counts; verify by deploying one dev replica and
 comparing RSS against an untouched one.
 
-=== 6. CompactString-backed labels — status: open (experiment)
+=== 6. CompactString-backed labels — status: *implemented on branch `compactstring-labels`, awaiting live A/B*
 
 Target: the ~14.5% allocator share. Inline ≤24-byte strings with no atomic
 refcounts — attacks the same allocations as the reverted Bytes-labels
 refactor without its contention failure mode (`Label` stays 48 bytes,
-clones are plain memcpy). Depends on candidate 2. Must be A/B-measured on
-the live cluster before adoption, exactly like the Bytes-labels experiment
-(single-threaded benchmarks were neutral-to-positive there while live CPU
-regressed 20%).
+guarded by a size test; clones are plain memcpy).
+
+Local measurements 2026-07-12 (training workload):
+
+* *Allocation calls −62%*: 143.2M → 54.8M (heaptrack on mimalloc-free
+  builds) — same magnitude as Bytes-labels (152M → 60M), without the
+  shared refcounts that caused its +20% live regression.
+* Wall clock neutral: 4.92 s vs 4.95 s (hyperfine, within noise) — also
+  matching the Bytes-labels local profile.
+* Peak RSS 21.2 → 19.9 MiB (mimalloc builds); heaptrack peak heap
+  10.98M → 10.28M.
+* Open observation: temporary allocations (malloc+free pairs, thread-local,
+  uncontended) doubled 6.0M → 12.0M — likely the `String` buffers regex
+  capture expansion still requires plus batch `Vec` growth.
+
+Implementation: `Label` fields are `CompactString`; a hand-written
+`prost::Message` impl for `Label` keeps the `TimeSeries`/`WriteRequest`
+derives and the decode path working. Parser and relabel produce
+`CompactString` directly from slices (no `String` intermediates on hot
+paths).
+
+*Decision pending the live-cluster A/B* — deploy `compactstring-labels`
+to one dev replica against a `perf-improvements-1` replica and compare
+per-replica CPU (the Bytes-labels experiment was local-neutral but +20%
+live).
 
 === 7. Remote-write 2.0 to Mimir — status: open (config only)
 

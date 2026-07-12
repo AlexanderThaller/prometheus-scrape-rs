@@ -2,6 +2,10 @@
 //!
 //! Semantics follow `model/relabel/relabel.go` from the Prometheus repository.
 
+use compact_str::{
+    CompactString,
+    ToCompactString as _,
+};
 use md5::{
     Digest,
     Md5,
@@ -221,11 +225,12 @@ impl LabelSet {
     }
 
     /// Set `name` to `value`, overwriting any existing label of that name.
-    fn set(&mut self, name: &str, value: String) {
+    fn set(&mut self, name: &str, value: impl Into<CompactString>) {
+        let value = value.into();
         if let Some(label) = self.labels.iter_mut().find(|label| label.name == name) {
             label.value = value;
         } else {
-            self.labels.push(Label::new(name.to_owned(), value));
+            self.labels.push(Label::new(name, value));
         }
     }
 
@@ -289,11 +294,11 @@ fn apply(set: &mut LabelSet, config: &RelabelConfig, val: &mut String) -> bool {
         Action::HashMod => {
             let joined = set.join(&config.source_labels, &config.separator, val);
             let hash = hash_mod(joined, config.modulus);
-            set.set(&config.target_label, hash.to_string());
+            set.set(&config.target_label, hash.to_compact_string());
         }
         Action::LabelMap => {
             // Collect first: we mutate `set` while iterating over matches.
-            let mut updates: Vec<(String, String)> = Vec::new();
+            let mut updates: Vec<(String, CompactString)> = Vec::new();
             for label in &set.labels {
                 if let Some(caps) = re.captures(&label.name) {
                     let mut name = String::new();
@@ -342,9 +347,9 @@ fn apply_replace(set: &mut LabelSet, config: &RelabelConfig, val: &mut String) {
             return;
         }
         let value = if config.replacement == "$1" || config.replacement == "${1}" {
-            Some(joined.to_owned())
+            Some(CompactString::from(joined))
         } else if !config.replacement.contains('$') {
-            Some(config.replacement.clone())
+            Some(CompactString::from(config.replacement.as_str()))
         } else {
             None // exotic replacement: general path below
         };
@@ -376,7 +381,10 @@ fn apply_replace(set: &mut LabelSet, config: &RelabelConfig, val: &mut String) {
         if config.replacement.is_empty() {
             set.remove(&config.target_label);
         } else {
-            set.set(&config.target_label, config.replacement.clone());
+            set.set(
+                &config.target_label,
+                CompactString::from(config.replacement.as_str()),
+            );
         }
         return;
     }
