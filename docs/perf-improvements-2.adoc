@@ -212,6 +212,12 @@ RW2.0 against a real Mimir, zero retries/failures throughout):
   the profile's top table; the remaining top blocks are series hashing
   (memory-bound), snappy, the parser and the encode write loop.
 
+Paired A/B against `main` (back-to-back 120 s captures, identical load,
+both runs 536 batches accepted, zero retries): *8754 → 7038 samples,
+−19.6% total agent CPU*. Training workload (hyperfine, 10 runs):
+*identical* (4.672 s both) — round 3 never touched the v1/parser path,
+so this doubles as the no-regression guard.
+
 === 5. Deferred / rejected
 
 * *zstd for retained bodies* — rejected in round 2 (C dependency in the
