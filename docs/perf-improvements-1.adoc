@@ -1,0 +1,241 @@
+= Performance improvements, round 2
+:toc:
+:source-highlighter: rouge
+
+Tracking document for the CPU/memory optimization candidates found in the
+2026-07-12 profiling session. Previous round shipped ~1.29x CPU (relabel
+default-regex fast path, parser slicing, label Vec headroom) and the
+vmagent-style retained-body staleness tracker (−50–60 MiB RSS per replica).
+The Bytes-labels refactor was tried and reverted (+20% live-cluster CPU from
+atomic refcount contention; the working refactor is preserved in
+`git stash@{0}`).
+
+== Profile baseline
+
+`perf record` on the profiling profile running
+`--pgo-training --pgo-corpus pgo-corpus` (24k samples, ~6.2 s wall,
+21.4 MiB peak RSS):
+
+[cols="3,1,4",options="header"]
+|===
+|Area |CPU share |Notes
+
+|`parser::parse`
+|~14–16%
+|Byte-at-a-time scanning everywhere; `is_name_continue` ~2.3%, label-value
+scan ~1.5%, naive `bytematch_count` ~1.1%.
+
+|regex machinery (`regex_automata::*`)
+|~19%
+|Driven by relabel rules. The Talos cluster config has *zero*
+`metric_relabel_configs`, so this cost is real only for the pikvm deployment
+(three literal-regex `mac_address` rules per sample) and the training
+workload itself.
+
+|`relabel::process` + `LabelSet`
+|~8.6%
+|Joins and linear scans.
+
+|prost encode (`WriteRequest::encode` + varint)
+|~11.4%
+|The derived impl walks the message tree twice: `encoded_len` per nested
+message, then `encode` recomputes the same lengths.
+
+|mimalloc (malloc/free/realloc)
+|~14.5%
+|Per-label `String` pairs, per-series `Vec<Label>` and `vec![Sample]`.
+
+|snappy `compress_vec`
+|~6%
+|Already near-optimal; shrinks if the payload shrinks.
+
+|label sort/merge
+|~3.4%
+|`sort_labels` insertion + compare ~2.2% (inlined into the harness frame).
+|===
+
+Found by code inspection (not visible in the training profile):
+
+* `remote_write.rs` `flush()` clones the entire compressed payload
+  `Vec<u8>` on *every* send attempt, including the first.
+* `sd_k8s.rs` `watch_resource` reflector stores keep full
+  Pod/EndpointSlice/Service/Node objects including `managedFields` —
+  typically the largest part of a Pod object. Production RSS lever.
+* Remote-write 2.0 (`WriteRequestV2`, symbol table, 40–60% smaller payloads
+  upstream) is already implemented and selectable via the existing
+  `protobuf_message` config field, but unused in the production configs.
+
+== Candidates
+
+=== 1. Parser: SIMD scanning via `memchr` — status: *done, 1.09x*
+
+Measured 2026-07-12 (hyperfine, 10 runs, training workload): 6.084 s ±
+0.052 → 5.587 s ± 0.038, *1.09 ± 0.01x faster overall*. All 107 tests
+pass, clippy clean.
+
+Target was ~14–16% CPU. Files: `src/parser.rs`, `Cargo.toml` (added
+`memchr = "2"`).
+
+* Line splitting in `parse`: replace the per-byte `!= b'\n'` loop with
+  `memchr::memchr`.
+* `bytematch_count` → `memchr::memchr_iter(..).count()` (drops the
+  `clippy::naive_bytecount` expect).
+* `parse_label_value` quote/escape scan → `memchr::memchr2(b'"', b'\\', ..)`.
+* `is_name_start`/`is_name_continue` → 256-entry `const` lookup tables.
+
+The existing parser tests gate parity.
+
+=== 2. Single-pass protobuf encoding — status: *done, ~1.03x*
+
+Measured 2026-07-12 (hyperfine, 10 runs, training workload): 5.587 s →
+5.423 s ± 0.036 on top of candidate 1, *cumulative 1.12 ± 0.01x vs the
+round baseline*. Output verified byte-identical to the prost derive.
+
+Target was ~11% CPU. Files: `src/model.rs`, `src/remote_write.rs`,
+`src/pgo.rs`.
+
+* Hand-written `encode_into(&self, buf: &mut Vec<u8>)` for the v1
+  `WriteRequest` path computing each `TimeSeries`/`Label` encoded length
+  exactly once (string field = 1 + varint(len) + len; sample = 9 fixed +
+  varint(ts); cache per-series totals in a reusable scratch `Vec<usize>`).
+* Keep the `prost::Message` derives for decode and tests; switch the two
+  encode call sites.
+* Test: `encode_into` output must byte-equal the derived `encode` output
+  for a corpus-parsed batch.
+* Side benefit: frees `Label` from prost's `String` field requirement,
+  unblocking candidate 6.
+
+=== 3. Relabel literal-regex fast paths — status: *done, 1.10x*
+
+Measured 2026-07-12 (hyperfine, 10 runs, training workload): 5.435 s →
+4.947 s ± 0.025, *cumulative ~1.22x vs the round baseline*. The training
+chain has two of four rules on the new fast paths (`LiteralPrefix` drop +
+labeldrop); the pikvm deployment (three literal replace rules per sample)
+should gain more.
+
+File: `src/relabel.rs`.
+
+* Classify patterns in `AnchoredRegex::new`: `Literal` (no regex
+  metacharacters), `LiteralPrefix` (literal followed by `.*`), `General`.
+* `Literal` → whole-string `==`; `LiteralPrefix` → `starts_with`; keep the
+  existing `(.*)` replace fast path. Covers keep/drop/labeldrop/labelkeep
+  and replace rules with literal regexes and no capture references (the
+  pikvm `mac_address` rules exactly).
+* Tests: fast-path vs general-path parity per action, including anchoring
+  semantics (a literal must match the whole joined value).
+
+=== 4. Stop cloning the compressed payload per send attempt — status: *done*
+
+File: `src/remote_write.rs`.
+
+The snappy output is wrapped in `bytes::Bytes` once; `reqwest` bodies built
+from `Bytes` clone by refcount. Removes one payload-sized allocation + copy
+per batch send plus one per retry. Not on the training-workload path, so no
+hyperfine delta — the win shows up per remote-write batch in production.
+
+=== 5. k8s reflectors: strip `managedFields` — status: *implemented, awaiting cluster A/B*
+
+Production RSS lever. File: `src/sd_k8s.rs`.
+
+The watcher stream now clears `metadata.managedFields` via
+`WatchStreamExt::modify` before it feeds the reflector. Annotations and
+labels are untouched — pod annotations become
+`__meta_kubernetes_pod_annotation_*` relabeling inputs. Expected: tens of
+MiB at cluster pod counts; verify by deploying one dev replica and
+comparing RSS against an untouched one.
+
+=== 6. CompactString-backed labels — status: *merged into `perf-improvements-1`*
+
+Target: the ~14.5% allocator share. Inline ≤24-byte strings with no atomic
+refcounts — attacks the same allocations as the reverted Bytes-labels
+refactor without its contention failure mode (`Label` stays 48 bytes,
+guarded by a size test; clones are plain memcpy).
+
+Local measurements 2026-07-12 (training workload):
+
+* *Allocation calls −62%*: 143.2M → 54.8M (heaptrack on mimalloc-free
+  builds) — same magnitude as Bytes-labels (152M → 60M), without the
+  shared refcounts that caused its +20% live regression.
+* Wall clock neutral: 4.92 s vs 4.95 s (hyperfine, within noise) — also
+  matching the Bytes-labels local profile.
+* Peak RSS 21.2 → 19.9 MiB (mimalloc builds); heaptrack peak heap
+  10.98M → 10.28M.
+* Open observation: temporary allocations (malloc+free pairs, thread-local,
+  uncontended) doubled 6.0M → 12.0M — likely the `String` buffers regex
+  capture expansion still requires plus batch `Vec` growth.
+
+Implementation: `Label` fields are `CompactString`; a hand-written
+`prost::Message` impl for `Label` keeps the `TimeSeries`/`WriteRequest`
+derives and the decode path working. Parser and relabel produce
+`CompactString` directly from slices (no `String` intermediates on hot
+paths).
+
+Merged 2026-07-12. Watch per-replica CPU on the next cluster rollout
+against the pre-merge numbers — the Bytes-labels experiment was
+local-neutral but +20% live, so a live regression here means reverting
+commit `bb17711`.
+
+=== 7. Remote-write 2.0 to Mimir — status: open (config only)
+
+Flip `protobuf_message` per endpoint once Mimir's distributor is verified
+to accept RW2 (experimental flag) against a dev tenant. 40–60% smaller
+payloads → less varint, snappy and network work. No code changes required;
+`encode_v2` already exists and is tested.
+
+=== 8. Snappy-compressed retained bodies — status: *done*
+
+`SeriesTracker` keeps one exposition body per target for staleness
+re-derivation; it is now stored snappy-compressed and decompressed only on
+vanish events. At ~40 MiB of retained bodies (311k series) the 7.1x ratio
+leaves ~5.6 MiB — roughly −35 MiB RSS per replica, to be confirmed live.
+
+Codec bakeoff on the real pgo-corpus bodies (2026-07-12, 1.9 MB corpus,
+300 rounds):
+
+[cols="1,1,1,1",options="header"]
+|===
+|codec |ratio |compress |decompress
+
+|snappy |7.12x |2195 MB/s |4726 MB/s
+|lz4 (`lz4_flex`) |7.66x |1769 MB/s |5546 MB/s
+|zstd −1 |11.54x |1261 MB/s |3393 MB/s
+|zstd −3 |11.76x |1019 MB/s |3260 MB/s
+|===
+
+Decision: *snappy*. Compression speed dominates this use case (one
+compress per scrape, ~23 µs per 50 KiB body; decompress is rare), snappy
+is already a dependency (remote-write), and lz4's +7% ratio does not
+justify a new crate. zstd's 11.5x would roughly halve the remaining
+footprint but adds a C dependency to the static musl build and halves
+throughput — revisit only if retained-body RSS ever matters at 10x the
+current scale.
+
+== Round result (2026-07-12)
+
+Candidates 1–5 shipped. Training workload (hyperfine, 10 runs each):
+*6.069 s ± 0.033 → 4.909 s ± 0.035, 1.24 ± 0.01x faster*. Peak RSS
+unchanged (21.3 MiB — no allocation-count changes this round). Final
+profile confirms the targeted symbols shrank in absolute terms:
+
+* `parser::parse` ~0.87 s → ~0.47 s (−45%)
+* protobuf encode ~0.69 s → ~0.41 s (−40%)
+* regex machinery ~1.15 s → ~0.47 s (−59%; the remainder is the
+  capture-group replace rule, correctly on the general path)
+* snappy and allocator unchanged in absolute terms, as expected
+
+The allocator is now the largest remaining block (~16.5% of the smaller
+total ≈ 0.81 s), which makes the CompactString experiment (candidate 6)
+the clear next lever. Candidate 5 (managedFields) needs its dev-replica
+RSS A/B; candidate 7 (remote-write 2.0) remains open; candidate 8
+(compressed retained bodies) shipped after a codec bakeoff.
+
+== Verification
+
+* `cargo test` and `cargo clippy --all-targets` with zero warnings.
+* Encode parity test (candidate 2) and relabel parity tests (candidate 3).
+* CPU: `hyperfine './target/profiling/prometheus-scrape-rs --pgo-training
+  --pgo-corpus pgo-corpus'` before/after (baseline ~6.2 s); `perf record`
+  to confirm the targeted symbols shrank.
+* Allocations/RSS: `MIMALLOC_SHOW_STATS=1` run before/after.
+* Memory candidates (5, 8): deploy to one dev replica and compare RSS
+  against an untouched replica, same A/B method as previous rounds.

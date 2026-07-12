@@ -68,7 +68,7 @@ pub fn parse(
     // Heuristic pre-size: most non-comment, non-blank lines yield one series.
     // Counting newlines over-estimates (comments/blanks) but avoids repeated
     // re-allocation on large bodies.
-    let estimate = bytematch_count(bytes, b'\n').saturating_add(1);
+    let estimate = memchr::memchr_iter(b'\n', bytes).count().saturating_add(1);
     let mut out = Vec::with_capacity(estimate.min(1 << 16));
 
     let mut line_no: usize = 0;
@@ -79,10 +79,7 @@ pub fn parse(
         line_no += 1;
         // Find end of the current line.
         let line_start = pos;
-        let mut line_end = pos;
-        while line_end < len && bytes[line_end] != b'\n' {
-            line_end += 1;
-        }
+        let line_end = memchr::memchr(b'\n', &bytes[pos..]).map_or(len, |offset| pos + offset);
         // Next iteration starts after the '\n' (or at len if none).
         pos = if line_end < len {
             line_end + 1
@@ -111,29 +108,50 @@ pub fn parse(
     Ok(out)
 }
 
-/// Count occurrences of `needle` in `haystack`.
-#[expect(
-    clippy::naive_bytecount,
-    reason = "used only for an output-Vec size hint; the bytecount crate is not a dependency"
-)]
-fn bytematch_count(haystack: &[u8], needle: u8) -> usize {
-    haystack.iter().filter(|&&b| b == needle).count()
-}
-
 /// Return `true` for ASCII space or tab.
 fn is_space(b: u8) -> bool {
     b == b' ' || b == b'\t'
 }
 
+/// Per-byte class bits for name scanning, indexed by byte value. One table
+/// lookup replaces the alphanumeric/underscore/colon comparison chain in the
+/// hottest parser loops.
+const NAME_START: u8 = 1 << 0; // [a-zA-Z_]
+const NAME_CONTINUE: u8 = 1 << 1; // [a-zA-Z0-9_]
+const NAME_COLON: u8 = 1 << 2; // ':'
+
+const NAME_CLASS: [u8; 256] = {
+    let mut table = [0u8; 256];
+    let mut b = 0usize;
+    while b < 256 {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "loop index is a byte value"
+        )]
+        let byte = b as u8;
+        if byte.is_ascii_alphabetic() || byte == b'_' {
+            table[b] = NAME_START | NAME_CONTINUE;
+        } else if byte.is_ascii_digit() {
+            table[b] = NAME_CONTINUE;
+        } else if byte == b':' {
+            table[b] = NAME_COLON;
+        }
+        b += 1;
+    }
+    table
+};
+
 /// First byte of a metric name / label name: `[a-zA-Z_:]` (label names
 /// disallow `:`, checked by the caller passing `allow_colon`).
 fn is_name_start(b: u8, allow_colon: bool) -> bool {
-    b.is_ascii_alphabetic() || b == b'_' || (allow_colon && b == b':')
+    let class = NAME_CLASS[b as usize];
+    class & NAME_START != 0 || (allow_colon && class & NAME_COLON != 0)
 }
 
 /// Continuation byte of a name: `[a-zA-Z0-9_:]` (`:` gated by `allow_colon`).
 fn is_name_continue(b: u8, allow_colon: bool) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || (allow_colon && b == b':')
+    let class = NAME_CLASS[b as usize];
+    class & NAME_CONTINUE != 0 || (allow_colon && class & NAME_COLON != 0)
 }
 
 /// Parse a single (already delimited) line.
@@ -388,7 +406,7 @@ fn parse_label_value(
     open: usize,
     end: usize,
     line_no: usize,
-) -> Result<(String, usize), ParseError> {
+) -> Result<(compact_str::CompactString, usize), ParseError> {
     let bytes = body.as_bytes();
     debug_assert_eq!(bytes[open], b'"');
     let content_start = open + 1;
@@ -397,35 +415,34 @@ fn parse_label_value(
 
     // Scan for the closing quote, noting whether any escape is present.
     loop {
-        if i >= end {
+        let Some(offset) = memchr::memchr2(b'"', b'\\', &bytes[i..end]) else {
             return Err(ParseError::new(
                 line_no,
                 "unterminated label value (missing closing '\"')",
             ));
+        };
+        i += offset;
+        if bytes[i] == b'"' {
+            break;
         }
-        match bytes[i] {
-            b'"' => break,
-            b'\\' => {
-                has_escape = true;
-                // Skip the escaped byte so an escaped quote/backslash does not
-                // terminate the scan. Validation happens in the slow path.
-                i += 1;
-                if i >= end {
-                    return Err(ParseError::new(
-                        line_no,
-                        "unterminated label value (trailing backslash)",
-                    ));
-                }
-                i += 1;
-            }
-            _ => i += 1,
+        has_escape = true;
+        // Skip the backslash and the escaped byte so an escaped
+        // quote/backslash does not terminate the scan. Validation happens in
+        // the slow path.
+        if i + 1 >= end {
+            return Err(ParseError::new(
+                line_no,
+                "unterminated label value (trailing backslash)",
+            ));
         }
+        i += 2;
     }
     let close = i;
 
     if !has_escape {
         let s = utf8_from(body, content_start, close, line_no)?;
-        return Ok((s.to_owned(), close + 1));
+        // Values up to 24 bytes are stored inline — no allocation.
+        return Ok((compact_str::CompactString::from(s), close + 1));
     }
 
     // Slow path: decode escapes.
@@ -462,7 +479,7 @@ fn parse_label_value(
         }
     }
 
-    Ok((decoded, close + 1))
+    Ok((decoded.into(), close + 1))
 }
 
 /// Parse a metric value. Handles a leading `+` (e.g. `+Inf`); otherwise defers

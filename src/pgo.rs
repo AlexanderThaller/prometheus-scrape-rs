@@ -12,8 +12,6 @@ use std::{
     path::Path,
 };
 
-use prost::Message as _;
-
 use crate::{
     model::{
         Label,
@@ -92,7 +90,7 @@ pub fn run_training_workload(corpus_dir: Option<&Path>) -> anyhow::Result<()> {
             }
             let request = WriteRequest { timeseries: batch };
             proto_buf.clear();
-            request.encode(&mut proto_buf)?;
+            request.encode_into(&mut proto_buf);
             let compressed = encoder.compress_vec(&proto_buf)?;
             checksum.0.write(&compressed);
         }

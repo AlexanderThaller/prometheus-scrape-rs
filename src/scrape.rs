@@ -257,7 +257,7 @@ fn build_targets(
             let mut params: Vec<(String, String)> = Vec::new();
             for label in &labels {
                 if let Some(param) = label.name.strip_prefix("__param_") {
-                    params.push((param.to_owned(), label.value.clone()));
+                    params.push((param.to_owned(), label.value.to_string()));
                 }
             }
             add_if_absent(&mut labels, "instance", &address);
@@ -387,18 +387,36 @@ async fn scrape_loop(
 /// re-parse runs only on vanish events. A u64 hash collision (odds ~1e-9
 /// at 300k series) costs at most one wrong or missing marker, never wrong
 /// sample data.
-#[derive(Default)]
 struct SeriesTracker {
-    /// Raw body and scrape timestamp of the last emitted scrape.
+    /// Compressed body and scrape timestamp of the last emitted scrape.
     retained: Option<RetainedScrape>,
     /// Sorted hashes of the scrape-timestamped series last emitted.
     hashes: Vec<u64>,
     /// Last size reported into the global `tracked_series` gauge.
     tracked_reported: u64,
+    /// Reused snappy encoder for compressing retained bodies.
+    encoder: snap::raw::Encoder,
+}
+
+impl Default for SeriesTracker {
+    fn default() -> Self {
+        Self {
+            retained: None,
+            hashes: Vec::new(),
+            tracked_reported: 0,
+            encoder: snap::raw::Encoder::new(),
+        }
+    }
 }
 
 struct RetainedScrape {
-    body: String,
+    /// Snappy-compressed exposition body. Measured ~7x smaller than the
+    /// raw text on the pgo-corpus bodies at ~2.2 GB/s compression (~23 µs
+    /// per 50 KiB scrape); decompressed only on vanish events. snappy beat
+    /// lz4 on compression speed at near-equal ratio and needs no new
+    /// dependency; zstd's better ratio (11.5x) was not worth a C dependency
+    /// in the static musl build.
+    compressed: Vec<u8>,
     start_ms: i64,
 }
 
@@ -432,7 +450,22 @@ impl SeriesTracker {
         let markers = self.rederive_markers(target, &vanished, start_ms);
 
         self.hashes = current;
-        self.retained = retained_body.map(|body| RetainedScrape { body, start_ms });
+        self.retained = retained_body.and_then(|body| {
+            match self.encoder.compress_vec(body.as_bytes()) {
+                Ok(compressed) => Some(RetainedScrape {
+                    compressed,
+                    start_ms,
+                }),
+                Err(err) => {
+                    warn!(
+                        url = target.url,
+                        %err,
+                        "compressing retained scrape body failed; staleness markers unavailable until the next scrape"
+                    );
+                    None
+                }
+            }
+        });
         self.update_gauge();
         markers
     }
@@ -464,11 +497,25 @@ impl SeriesTracker {
         let Some(retained) = &self.retained else {
             return Vec::new();
         };
-        let Ok(series) =
-            crate::parser::parse(&retained.body, retained.start_ms, target.honor_timestamps)
+        // The body compressed cleanly when it was retained; failures from
+        // here on would be determinism bugs.
+        let Ok(body) = snap::raw::Decoder::new().decompress_vec(&retained.compressed) else {
+            warn!(
+                url = target.url,
+                "retained scrape body failed to decompress; staleness markers skipped"
+            );
+            return Vec::new();
+        };
+        let Ok(body) = std::str::from_utf8(&body) else {
+            warn!(
+                url = target.url,
+                "retained scrape body is not valid UTF-8 after decompression; staleness markers \
+                 skipped"
+            );
+            return Vec::new();
+        };
+        let Ok(series) = crate::parser::parse(body, retained.start_ms, target.honor_timestamps)
         else {
-            // The body parsed when it was scraped; failing here would be a
-            // parser determinism bug.
             warn!(
                 url = target.url,
                 "retained scrape body failed to re-parse; staleness markers skipped"
@@ -708,7 +755,8 @@ fn get_label<'a>(labels: &'a [Label], name: &str) -> &'a str {
         .map_or("", |label| label.value.as_str())
 }
 
-fn set_label(labels: &mut Vec<Label>, name: &str, value: String) {
+fn set_label(labels: &mut Vec<Label>, name: &str, value: impl Into<compact_str::CompactString>) {
+    let value = value.into();
     if let Some(existing) = labels.iter_mut().find(|label| label.name == name) {
         existing.value = value;
     } else {

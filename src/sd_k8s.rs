@@ -29,6 +29,7 @@ use k8s_openapi::api::{
 use kube::{
     api::Api,
     runtime::{
+        WatchStreamExt as _,
         reflector::{
             self,
             Store,
@@ -263,7 +264,15 @@ where
     let job = job.to_owned();
     let notify = notify.clone();
     let (store, writer) = reflector::store();
-    let stream = reflector::reflector(writer, watcher(api, watcher::Config::default()));
+    // managedFields is typically the largest part of a watched object and
+    // nothing downstream reads it; dropping it before the reflector keeps
+    // it out of the long-lived stores.
+    let stream = reflector::reflector(
+        writer,
+        watcher(api, watcher::Config::default()).modify(|obj| {
+            obj.meta_mut().managed_fields = None;
+        }),
+    );
     let task = tokio::spawn(async move {
         let mut stream = std::pin::pin!(stream);
         while let Some(event) = stream.next().await {
