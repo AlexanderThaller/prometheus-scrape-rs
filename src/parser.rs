@@ -278,7 +278,8 @@ fn parse_line(
 
     Ok(Some(TimeSeries {
         labels,
-        samples: vec![Sample { value, timestamp }],
+        sample: Sample { value, timestamp },
+        labels_hash: 0,
     }))
 }
 
@@ -611,8 +612,8 @@ rpc_duration_seconds_count 2693
         assert_eq!(metric(first), "http_requests_total");
         assert_eq!(label(first, "method"), Some("post"));
         assert_eq!(label(first, "code"), Some("200"));
-        assert!((first.samples[0].value - 1027.0).abs() < f64::EPSILON);
-        assert_eq!(first.samples[0].timestamp, 1_395_066_363_000);
+        assert!((first.sample.value - 1027.0).abs() < f64::EPSILON);
+        assert_eq!(first.sample.timestamp, 1_395_066_363_000);
 
         // Gauge with no labels and a default timestamp.
         let load = series
@@ -620,22 +621,22 @@ rpc_duration_seconds_count 2693
             .find(|s| metric(s) == "node_load1")
             .expect("load series");
         assert_eq!(load.labels.len(), 1);
-        assert_eq!(load.samples[0].timestamp, TS);
-        assert!((load.samples[0].value - 0.42).abs() < 1e-9);
+        assert_eq!(load.sample.timestamp, TS);
+        assert!((load.sample.value - 0.42).abs() < 1e-9);
 
         // +Inf bucket.
         let inf = series
             .iter()
             .find(|s| label(s, "le") == Some("+Inf"))
             .expect("inf bucket");
-        assert!((inf.samples[0].value - 144_320.0).abs() < f64::EPSILON);
+        assert!((inf.sample.value - 144_320.0).abs() < f64::EPSILON);
 
         // Scientific notation sum.
         let sum = series
             .iter()
             .find(|s| metric(s) == "rpc_duration_seconds_sum")
             .expect("rpc sum");
-        assert!((sum.samples[0].value - 1.756_047_3e7).abs() < 1.0);
+        assert!((sum.sample.value - 1.756_047_3e7).abs() < 1.0);
 
         Ok(())
     }
@@ -695,7 +696,7 @@ rpc_duration_seconds_count 2693
         ];
         for (body, expected) in cases {
             let s = parse(body, TS, true)?;
-            let got = s[0].samples[0].value;
+            let got = s[0].sample.value;
             let ok = if expected.is_infinite() {
                 got.is_infinite() && got.is_sign_positive() == expected.is_sign_positive()
             } else {
@@ -708,7 +709,7 @@ rpc_duration_seconds_count 2693
         for body in ["m NaN", "m nan", "m NAN"] {
             let s = parse(body, TS, true)?;
             assert!(
-                s[0].samples[0].value.is_nan(),
+                s[0].sample.value.is_nan(),
                 "body {body:?} should be NaN"
             );
         }
@@ -719,26 +720,26 @@ rpc_duration_seconds_count 2693
     fn timestamps() -> Result<(), ParseError> {
         // Present milliseconds.
         let s = parse("m 1 1395066363000", TS, true)?;
-        assert_eq!(s[0].samples[0].timestamp, 1_395_066_363_000);
+        assert_eq!(s[0].sample.timestamp, 1_395_066_363_000);
 
         // Absent: default used.
         let s = parse("m 1", TS, true)?;
-        assert_eq!(s[0].samples[0].timestamp, TS);
+        assert_eq!(s[0].sample.timestamp, TS);
 
         // Negative.
         let s = parse("m 1 -1000", TS, true)?;
-        assert_eq!(s[0].samples[0].timestamp, -1000);
+        assert_eq!(s[0].sample.timestamp, -1000);
 
         // OpenMetrics float seconds -> ms.
         let s = parse("m 1 1.5", TS, true)?;
-        assert_eq!(s[0].samples[0].timestamp, 1500);
+        assert_eq!(s[0].sample.timestamp, 1500);
 
         let s = parse("m 1 1395066363.123", TS, true)?;
-        assert_eq!(s[0].samples[0].timestamp, 1_395_066_363_123);
+        assert_eq!(s[0].sample.timestamp, 1_395_066_363_123);
 
         // Scientific-notation seconds.
         let s = parse("m 1 1.5e0", TS, true)?;
-        assert_eq!(s[0].samples[0].timestamp, 1500);
+        assert_eq!(s[0].sample.timestamp, 1500);
 
         Ok(())
     }
@@ -746,10 +747,10 @@ rpc_duration_seconds_count 2693
     #[test]
     fn honor_timestamps_false_forces_default() -> Result<(), ParseError> {
         let s = parse("m 1 1395066363000", TS, false)?;
-        assert_eq!(s[0].samples[0].timestamp, TS);
+        assert_eq!(s[0].sample.timestamp, TS);
 
         let s = parse("m 1", TS, false)?;
-        assert_eq!(s[0].samples[0].timestamp, TS);
+        assert_eq!(s[0].sample.timestamp, TS);
         Ok(())
     }
 
@@ -757,12 +758,12 @@ rpc_duration_seconds_count 2693
     fn exemplar_suffix_ignored() -> Result<(), ParseError> {
         // Exemplar after value.
         let s = parse("m 1 # {trace_id=\"abc\"} 1.0", TS, true)?;
-        assert!((s[0].samples[0].value - 1.0).abs() < f64::EPSILON);
-        assert_eq!(s[0].samples[0].timestamp, TS);
+        assert!((s[0].sample.value - 1.0).abs() < f64::EPSILON);
+        assert_eq!(s[0].sample.timestamp, TS);
 
         // Exemplar after value + timestamp.
         let s = parse("m 1 1500 # {trace_id=\"abc\"} 1.0 1520", TS, true)?;
-        assert_eq!(s[0].samples[0].timestamp, 1500);
+        assert_eq!(s[0].sample.timestamp, 1500);
         Ok(())
     }
 
@@ -804,7 +805,7 @@ rpc_duration_seconds_count 2693
         let s = parse("m { a = \"b\" , c = \"d\" }  5  1500", TS, true)?;
         assert_eq!(label(&s[0], "a"), Some("b"));
         assert_eq!(label(&s[0], "c"), Some("d"));
-        assert_eq!(s[0].samples[0].timestamp, 1500);
+        assert_eq!(s[0].sample.timestamp, 1500);
         Ok(())
     }
 

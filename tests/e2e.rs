@@ -17,11 +17,31 @@ use std::{
 
 use prometheus_scrape_rs::{
     config,
-    model::WriteRequest,
+    model::{
+        Label,
+        Sample,
+    },
     remote_write,
     scrape,
 };
 use prost::Message as _;
+
+/// Prost view of the remote-write 1.0 wire format. The agent's internal
+/// series type is no longer a prost message (it holds a single sample),
+/// so this test decodes what actually crossed the wire.
+#[derive(Clone, PartialEq, prost::Message)]
+struct WireTimeSeries {
+    #[prost(message, repeated, tag = "1")]
+    labels: Vec<Label>,
+    #[prost(message, repeated, tag = "2")]
+    samples: Vec<Sample>,
+}
+
+#[derive(Clone, PartialEq, prost::Message)]
+struct WriteRequest {
+    #[prost(message, repeated, tag = "1")]
+    timeseries: Vec<WireTimeSeries>,
+}
 
 const SCRAPE_BODY: &str = "\
 # HELP test_metric A test metric.

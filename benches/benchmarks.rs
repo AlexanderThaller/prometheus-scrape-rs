@@ -25,7 +25,6 @@ use prometheus_scrape_rs::{
         RelabelConfig,
     },
 };
-use prost::Message as _;
 
 /// Same allocator as the shipped binary so numbers reflect production.
 #[global_allocator]
@@ -118,10 +117,11 @@ fn write_request(series: usize) -> WriteRequest {
                     Label::new("job", "app"),
                     Label::new("path", format!("/api/v1/resource/{i}")),
                 ],
-                samples: vec![Sample {
+                sample: Sample {
                     value: 42.0,
                     timestamp: 1_700_000_000_000 + i64::try_from(i).unwrap_or(0),
-                }],
+                },
+                labels_hash: 0,
             })
             .collect(),
     }
@@ -137,9 +137,7 @@ fn bench_encode(c: &mut Criterion) {
             let mut encoder = snap::raw::Encoder::new();
             b.iter(|| {
                 proto_buf.clear();
-                black_box(&request)
-                    .encode(&mut proto_buf)
-                    .expect("vec encode cannot fail");
+                black_box(&request).encode_into(&mut proto_buf);
                 black_box(
                     encoder
                         .compress_vec(&proto_buf)

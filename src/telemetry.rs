@@ -245,7 +245,8 @@ impl Metrics {
                 sort_labels(&mut labels);
                 TimeSeries {
                     labels,
-                    samples: vec![Sample { value, timestamp }],
+                    sample: Sample { value, timestamp },
+                    labels_hash: 0,
                 }
             })
             .collect();
@@ -316,7 +317,7 @@ mod tests {
                     .iter()
                     .any(|l| l.name == "job" && l.value == "self")
             );
-            assert_eq!(s.samples[0].timestamp, 5_000);
+            assert_eq!(s.sample.timestamp, 5_000);
         }
     }
 

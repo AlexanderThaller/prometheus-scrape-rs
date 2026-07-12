@@ -209,7 +209,7 @@ impl Endpoint {
             tokio::select! {
                 received = rx.recv() => match received {
                     Some(batch) => {
-                        pending_samples += batch.iter().map(|s| s.samples.len()).sum::<usize>();
+                        pending_samples += batch.len();
                         pending.extend(batch);
                         while pending_samples >= self.max_samples_per_send {
                             let (chunk, samples) = split_batch(&mut pending, self.max_samples_per_send);
@@ -262,7 +262,7 @@ impl Endpoint {
         }
 
         let series_count = batch.len();
-        let sample_count: u64 = batch.iter().map(|series| series.samples.len() as u64).sum();
+        let sample_count = batch.len() as u64;
         proto_buf.clear();
         match self.protocol {
             ProtobufMessage::WriteRequestV1 => {
@@ -488,10 +488,8 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
         if !refs.is_empty() {
             series_len += 1 + varint_len(packed as u64) + packed;
         }
-        for sample in &series.samples {
-            let len = sample.wire_len();
-            series_len += 1 + varint_len(len as u64) + len;
-        }
+        let sample_len = series.sample.wire_len();
+        series_len += 1 + varint_len(sample_len as u64) + sample_len;
         buf.push(0x2a);
         put_varint(series_len as u64, buf);
         // Field 1: packed uint32 labels_refs (omitted when empty, matching
@@ -503,30 +501,20 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
                 put_varint(u64::from(reference), buf);
             }
         }
-        // Field 2: repeated Sample.
-        for sample in &series.samples {
-            buf.push(0x12);
-            put_varint(sample.wire_len() as u64, buf);
-            sample.put_fields(buf);
-        }
+        // Field 2: the single sample, as a repeated field of one.
+        buf.push(0x12);
+        put_varint(series.sample.wire_len() as u64, buf);
+        series.sample.put_fields(buf);
     }
 }
 
 /// Split off up to `max_samples` worth of leading series from `pending`.
-/// Returns the chunk and the number of samples it holds. Series are never
-/// split, so a chunk may slightly exceed `max_samples`.
+/// Returns the chunk and the number of samples it holds (one per series).
 fn split_batch(pending: &mut Vec<TimeSeries>, max_samples: usize) -> (Vec<TimeSeries>, usize) {
-    let mut samples = 0usize;
-    let mut cut = 0usize;
-    for (i, series) in pending.iter().enumerate() {
-        if samples >= max_samples {
-            break;
-        }
-        samples += series.samples.len();
-        cut = i + 1;
-    }
+    let cut = max_samples.min(pending.len());
     let rest = pending.split_off(cut);
     let chunk = std::mem::replace(pending, rest);
+    let samples = chunk.len();
     (chunk, samples)
 }
 
@@ -571,7 +559,7 @@ mod tests {
                 }
                 TimeSeriesV2 {
                     labels_refs,
-                    samples: series.samples,
+                    samples: vec![series.sample],
                 }
             })
             .collect();
@@ -589,10 +577,7 @@ mod tests {
     fn encode_v2_into_matches_reference() {
         let batches: Vec<Vec<TimeSeries>> = vec![
             Vec::new(),
-            vec![TimeSeries {
-                labels: Vec::new(),
-                samples: Vec::new(),
-            }],
+            vec![TimeSeries::default()],
             vec![
                 TimeSeries {
                     labels: vec![
@@ -601,26 +586,22 @@ mod tests {
                         Label::new("empty", ""),
                         Label::new("long", "x".repeat(300)),
                     ],
-                    samples: vec![
-                        Sample {
-                            value: 1027.0,
-                            timestamp: 1_395_066_363_000,
-                        },
-                        Sample {
-                            value: 0.0,
-                            timestamp: 0,
-                        },
-                    ],
+                    sample: Sample {
+                        value: 1027.0,
+                        timestamp: 1_395_066_363_000,
+                    },
+                    labels_hash: 0,
                 },
                 TimeSeries {
                     labels: vec![
                         Label::new("__name__", "http_requests_total"),
                         Label::new("job", "other"),
                     ],
-                    samples: vec![Sample {
+                    sample: Sample {
                         value: crate::model::stale_nan(),
                         timestamp: -1,
-                    }],
+                    },
+                    labels_hash: 0,
                 },
             ],
         ];
@@ -652,24 +633,23 @@ mod tests {
         assert_eq!(buf, reference);
     }
 
-    fn series(name: &str, samples: usize) -> TimeSeries {
+    fn series(name: &str, timestamp: i64) -> TimeSeries {
         TimeSeries {
             labels: vec![Label::new("__name__", name)],
-            samples: (0..samples)
-                .map(|i| Sample {
-                    value: 1.0,
-                    timestamp: i64::try_from(i).unwrap_or(i64::MAX),
-                })
-                .collect(),
+            sample: Sample {
+                value: 1.0,
+                timestamp,
+            },
+            labels_hash: 0,
         }
     }
 
     #[test]
     fn split_batch_respects_sample_budget() {
         let mut pending = vec![series("a", 3), series("b", 3), series("c", 3)];
-        let (chunk, samples) = split_batch(&mut pending, 5);
+        let (chunk, samples) = split_batch(&mut pending, 2);
         assert_eq!(chunk.len(), 2);
-        assert_eq!(samples, 6);
+        assert_eq!(samples, 2);
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].labels[0].value, "c");
     }
@@ -688,17 +668,19 @@ mod tests {
         let batch = vec![
             TimeSeries {
                 labels: vec![Label::new("__name__", "up"), Label::new("job", "node")],
-                samples: vec![Sample {
+                sample: Sample {
                     value: 1.0,
                     timestamp: 10,
-                }],
+                },
+                labels_hash: 0,
             },
             TimeSeries {
                 labels: vec![Label::new("__name__", "up"), Label::new("job", "other")],
-                samples: vec![Sample {
+                sample: Sample {
                     value: 0.0,
                     timestamp: 10,
-                }],
+                },
+                labels_hash: 0,
             },
         ];
         let request = encode_v2(batch);
@@ -738,7 +720,7 @@ mod tests {
     fn v2_empty_label_value_uses_reserved_zero_ref() {
         let batch = vec![TimeSeries {
             labels: vec![Label::new("empty", "")],
-            samples: vec![],
+            ..TimeSeries::default()
         }];
         let request = encode_v2(batch);
         assert_eq!(request.timeseries[0].labels_refs[1], 0);
@@ -754,14 +736,18 @@ mod tests {
 
     #[test]
     fn write_request_roundtrips_protobuf_snappy() -> anyhow::Result<()> {
+        // Round-trip through the single-pass encoder and snappy; decoding
+        // uses the same prost shadow types as the model parity tests.
         let request = WriteRequest {
             timeseries: vec![series("up", 1)],
         };
-        let encoded = request.encode_to_vec();
+        let mut encoded = Vec::new();
+        request.encode_into(&mut encoded);
         let compressed = snap::raw::Encoder::new().compress_vec(&encoded)?;
         let decompressed = snap::raw::Decoder::new().decompress_vec(&compressed)?;
-        let decoded = WriteRequest::decode(decompressed.as_slice())?;
-        assert_eq!(decoded, request);
+        let decoded = crate::model::tests::PbWriteRequest::decode(decompressed.as_slice())?;
+        assert_eq!(decoded.timeseries[0].samples[0].timestamp, 1);
+        assert_eq!(decoded.timeseries[0].labels[0].value, "up");
         Ok(())
     }
 }

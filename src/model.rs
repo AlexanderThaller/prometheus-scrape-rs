@@ -108,18 +108,28 @@ pub struct Sample {
     pub timestamp: i64,
 }
 
-#[derive(Clone, PartialEq, prost::Message)]
+/// One series carrying one sample — the pipeline's unit of work.
+///
+/// This is the *internal* series type, not a prost message: every series
+/// in this agent holds exactly one sample by construction (the parser
+/// emits one series per sample line, staleness markers are single-sample),
+/// so the wire protocols' `repeated samples` is a repeated-of-one written
+/// by the hand-rolled encoders. Dropping the per-series `Vec<Sample>`
+/// removed one heap allocation per series per scrape (~20% of live
+/// allocation calls).
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct TimeSeries {
     /// Must be sorted by label name and contain no duplicates when sent.
-    #[prost(message, repeated, tag = "1")]
     pub labels: Vec<Label>,
-    #[prost(message, repeated, tag = "2")]
-    pub samples: Vec<Sample>,
+    pub sample: Sample,
+    /// Hash of the final label set, filled by the scrape pipeline right
+    /// after labels are finalized (while they are cache-hot) and consumed
+    /// by the staleness tracker. Zero until finalized; never on the wire.
+    pub labels_hash: u64,
 }
 
-#[derive(Clone, PartialEq, prost::Message)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct WriteRequest {
-    #[prost(message, repeated, tag = "1")]
     pub timeseries: Vec<TimeSeries>,
 }
 
@@ -255,22 +265,17 @@ impl TimeSeries {
                 1 + varint_len(len as u64) + len
             })
             .sum();
-        let samples: usize = self
-            .samples
-            .iter()
-            .map(|sample| {
-                let len = sample.wire_len();
-                1 + varint_len(len as u64) + len
-            })
-            .sum();
-        labels + samples
+        let sample_len = self.sample.wire_len();
+        labels + 1 + varint_len(sample_len as u64) + sample_len
     }
 }
 
 impl WriteRequest {
     /// Encode into `buf` (appending) in a single pass.
     ///
-    /// Produces exactly the bytes of the derived `prost::Message::encode`.
+    /// Produces exactly the bytes prost's derive would emit for the
+    /// equivalent `prompb` message (each series' single sample as a
+    /// repeated field of one).
     pub fn encode_into(&self, buf: &mut Vec<u8>) {
         for series in &self.timeseries {
             let series_len = series.wire_len();
@@ -282,20 +287,50 @@ impl WriteRequest {
                 put_string_field(TAG1_LEN, &label.name, buf);
                 put_string_field(TAG2_LEN, &label.value, buf);
             }
-            for sample in &series.samples {
-                buf.push(TAG2_LEN);
-                put_varint(sample.wire_len() as u64, buf);
-                sample.put_fields(buf);
-            }
+            buf.push(TAG2_LEN);
+            put_varint(series.sample.wire_len() as u64, buf);
+            series.sample.put_fields(buf);
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use prost::Message as _;
 
     use super::*;
+
+    /// Prost-derived shadow of the `prompb` wire format, used to pin the
+    /// hand-rolled encoders now that the internal [`TimeSeries`] is not a
+    /// prost message. Also used by the remote-write round-trip test.
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(crate) struct PbTimeSeries {
+        #[prost(message, repeated, tag = "1")]
+        pub(crate) labels: Vec<Label>,
+        #[prost(message, repeated, tag = "2")]
+        pub(crate) samples: Vec<Sample>,
+    }
+
+    #[derive(Clone, PartialEq, prost::Message)]
+    pub(crate) struct PbWriteRequest {
+        #[prost(message, repeated, tag = "1")]
+        pub(crate) timeseries: Vec<PbTimeSeries>,
+    }
+
+    /// The wire view of an internal series: its single sample becomes a
+    /// repeated field of one.
+    fn shadow(request: &WriteRequest) -> PbWriteRequest {
+        PbWriteRequest {
+            timeseries: request
+                .timeseries
+                .iter()
+                .map(|series| PbTimeSeries {
+                    labels: series.labels.clone(),
+                    samples: vec![series.sample.clone()],
+                })
+                .collect(),
+        }
+    }
 
     /// The hand-rolled encoder must be byte-identical to the prost derive
     /// across the edge cases prost handles specially: default (skipped)
@@ -314,38 +349,53 @@ mod tests {
                         Label::new("unicode", "héllo→世界"),
                         Label::new("long", "x".repeat(300)),
                     ],
-                    samples: vec![
-                        Sample {
-                            value: 1027.0,
-                            timestamp: 1_395_066_363_000,
-                        },
-                        Sample {
-                            value: 0.0,
-                            timestamp: 0,
-                        },
-                        Sample {
-                            value: -0.0,
-                            timestamp: -1,
-                        },
-                        Sample {
-                            value: stale_nan(),
-                            timestamp: i64::MAX,
-                        },
-                        Sample {
-                            value: f64::MIN_POSITIVE,
-                            timestamp: i64::MIN,
-                        },
-                    ],
+                    sample: Sample {
+                        value: 1027.0,
+                        timestamp: 1_395_066_363_000,
+                    },
+                    labels_hash: 0,
                 },
                 TimeSeries {
                     labels: Vec::new(),
-                    samples: Vec::new(),
+                    sample: Sample {
+                        value: 0.0,
+                        timestamp: 0,
+                    },
+                    labels_hash: 0,
+                },
+                TimeSeries {
+                    labels: vec![Label::new("edge", "cases")],
+                    sample: Sample {
+                        value: -0.0,
+                        timestamp: -1,
+                    },
+                    labels_hash: 0,
+                },
+                TimeSeries {
+                    labels: vec![Label::new("edge", "stale")],
+                    sample: Sample {
+                        value: stale_nan(),
+                        timestamp: i64::MAX,
+                    },
+                    labels_hash: 0,
+                },
+                TimeSeries {
+                    labels: vec![Label::new("edge", "min")],
+                    sample: Sample {
+                        value: f64::MIN_POSITIVE,
+                        timestamp: i64::MIN,
+                    },
+                    labels_hash: 0,
                 },
             ],
         };
         let mut buf = Vec::new();
         request.encode_into(&mut buf);
-        assert_eq!(buf, request.encode_to_vec());
+        assert_eq!(buf, shadow(&request).encode_to_vec());
+
+        // The stale-NaN bit pattern survives a decode round-trip.
+        let decoded = PbWriteRequest::decode(buf.as_slice()).expect("decode");
+        assert!(is_stale_nan(decoded.timeseries[3].samples[0].value));
     }
 
     /// The bytes-labels experiment showed `Label` size directly moves the

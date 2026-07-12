@@ -184,21 +184,33 @@ arithmetic. Conclusion: the win requires hashing while labels are hot in
 `finalize_series_labels`, which candidate 4's internal series type can
 carry as a precomputed `labels_hash` — folded into candidate 4.
 
-=== 4. Single-sample series in the internal model — status: open
+=== 4. Single-sample series in the internal model — status: *done*
 
-Target: ~20% of live allocations (one `vec![Sample]` per series per
-scrape) plus 24 bytes per series of `Vec` overhead in every batch.
-Files: `src/model.rs`, `src/parser.rs`, `src/scrape.rs`,
-`src/remote_write.rs`.
+The internal series type now holds `sample: Sample` plus a precomputed
+`labels_hash` (folding in candidate 3's conclusion: the hash is computed
+in `finalize_series_labels` while labels are cache-hot, and the tracker
+just reads it). The hand-rolled encoders write the sample as a repeated
+field of one — wire-format identical; prost derives moved to test-only
+shadow types (`model::tests`, `tests/e2e.rs`).
 
-The pipeline creates exactly one sample per series per scrape (the
-parser emits one `TimeSeries` per sample line; staleness markers are
-single-sample too). Replace `samples: Vec<Sample>` with `sample: Sample`
-in the *internal* series type; the hand-rolled encoders write it as a
-repeated field of one on the wire (wire-format identical). The prost
-derives move to test-only shadow types for decode/parity. Combines
-naturally with candidate 1 since the v2 encoder is being rewritten
-anyway.
+Measured (live harness): allocator symbols dropped out of the CPU
+profile's top table entirely (were ~6.6% combined), CPU otherwise flat.
+heaptrack, same 150 s window as the round baseline: *2.67M allocation
+calls at 1.16M samples vs 6.14M at 1.25M — allocations per scraped
+sample −53% (4.92 → 2.30)*.
+
+== Round-3 result (2026-07-13)
+
+All four candidates shipped. Live harness (30.6k series, 4 s interval,
+RW2.0 against a real Mimir, zero retries/failures throughout):
+
+* *Total agent CPU −22%* (perf samples 9048 → ~7000 at identical load),
+  dominated by the single-pass v2 encoder with memoized interning.
+* *Allocation calls per scraped sample −53%* (heaptrack 4.92 → 2.30),
+  from the encoder rewrite plus the single-sample series type.
+* `SipHash`, `Utf8Chunks`, prost varint and the allocator have all left
+  the profile's top table; the remaining top blocks are series hashing
+  (memory-bound), snappy, the parser and the encode write loop.
 
 === 5. Deferred / rejected
 
