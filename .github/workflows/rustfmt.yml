@@ -1,0 +1,27 @@
+name: Rustfmt
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  rustfmt:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # rustfmt.toml uses unstable options (e.g. imports_granularity), so
+      # formatting must be checked with nightly.
+      # https://github.com/dtolnay/rust-toolchain
+      - name: Install Rust nightly toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: nightly
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check

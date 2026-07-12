@@ -1,0 +1,42 @@
+name: Tests
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # https://github.com/dtolnay/rust-toolchain
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master
+        with:
+          toolchain: stable
+
+      # https://github.com/taiki-e/install-action
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@daa3c1f1f9a9d46f686d9fc2f65773d0c293688b # v2.62.44
+        with:
+          tool: nextest
+
+      # https://github.com/Swatinem/rust-cache
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: Run tests
+        run: cargo nextest run --all-targets --all-features
+
+      # nextest cannot run doctests, so run them separately.
+      # https://nexte.st/docs/running/#limitations
+      - name: Run doctests
+        run: cargo test --doc --all-features
