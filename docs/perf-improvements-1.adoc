@@ -67,9 +67,13 @@ Found by code inspection (not visible in the training profile):
 
 == Candidates
 
-=== 1. Parser: SIMD scanning via `memchr` — status: open
+=== 1. Parser: SIMD scanning via `memchr` — status: *done, 1.09x*
 
-Target: ~14–16% CPU. Files: `src/parser.rs`, `Cargo.toml` (add
+Measured 2026-07-12 (hyperfine, 10 runs, training workload): 6.084 s ±
+0.052 → 5.587 s ± 0.038, *1.09 ± 0.01x faster overall*. All 107 tests
+pass, clippy clean.
+
+Target was ~14–16% CPU. Files: `src/parser.rs`, `Cargo.toml` (added
 `memchr = "2"`).
 
 * Line splitting in `parse`: replace the per-byte `!= b'\n'` loop with
