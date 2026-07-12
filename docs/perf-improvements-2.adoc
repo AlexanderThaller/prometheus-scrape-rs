@@ -1,0 +1,196 @@
+= Performance improvements, round 3
+:toc:
+:source-highlighter: rouge
+
+Tracking document for the third optimization round (2026-07-12, branch
+`perf-improvements-2`). Round 2 (see `perf-improvements-1.adoc`) shipped
+1.25x CPU on the training workload plus the memory work (CompactString
+labels, compressed retained bodies, managedFields stripping) and is live
+in production. Per [the user's priority] memory savings outrank CPU
+savings; the Bytes-labels bar (+20% live CPU) remains the revert
+criterion.
+
+== What is new this round: live remote-write profiling
+
+The training workload never exercised the network path. This round adds a
+*live harness* that captures the full pipeline including remote-write 2.0
+against the local Mimir:
+
+* `python3 -m http.server 18000` serving `pgo-corpus/*.prom` as scrape
+  bodies;
+* an agent config with one job per corpus file × two replica-labeled
+  targets (14 targets, ~30.6k tracked series), `scrape_interval: 4s`
+  (2s overruns the local Mimir ingest limit: 1.3k retries and queue-full
+  drops in 2 minutes — 4s runs clean);
+* `remote_write` to `http://127.0.0.1:9009/api/v1/push` with
+  `protobuf_message: io.prometheus.write.v2.Request` and
+  `X-Scope-OrgID: anonymous` — matching the production protocol, which
+  turned out to be RW2.0 already.
+
+Config lives in the session scratchpad (`live-test.yml`); regenerate with
+the snippet above. Verified end-to-end: batches accepted by Mimir, zero
+retries/failures during the measurement window.
+
+== Live profile (RW2.0, 120 s @ 4 s interval, 9048 samples)
+
+[cols="3,1,4",options="header"]
+|===
+|Area |CPU share |Notes
+
+|`encode_v2` total
+|*~23%*
+|`encode_v2` closure 8.7% + SipHash of the symbol-interning
+`HashMap<String, u32>` (6.6% `sip::Hasher::write` + 5.5%
+`RandomState::hash_one::<&str>`) + prost varint 2.4%. Every label name and
+value is SipHashed per batch, and interning does `to_owned()` twice per
+unique string. *The single-pass encoder from round 2 covers v1 only — the
+production (v2) encode path is entirely unoptimized.*
+
+|`scrape_loop` inlined work
+|12.6%
+|Includes `SeriesTracker::advance`: byte-at-a-time FNV `hash_labels` over
+every label of every series, every scrape.
+
+|snappy `compress_vec`
+|7.0%
+|Remote-write payload + retained-body compression combined. Accepted cost.
+
+|`parser::parse`
+|7.0%
+|Already memchr-optimized in round 2.
+
+|`response.text()` UTF-8 lossy conversion
+|4.3%
+|`Utf8Chunks::next` — reqwest's `text()` copies the entire body every
+scrape even when it is valid UTF-8. `bytes()` + `str::from_utf8` validates
+without copying.
+
+|`finalize_series_labels`
+|4.1%
+|Merge + relabel + external labels.
+
+|mimalloc
+|~7.3%
+|Symbol table `Vec<String>`/`HashMap` churn is a large contributor (see
+allocation profile below).
+
+|`sort_labels`
+|2.0%
+|Small.
+|===
+
+== Updated training-workload baseline (post round 2)
+
+19996 samples: parse 13.4%, harness 11.9%, `encode_into` (v1) 10.3%,
+onepass DFA 8.1% (the capture-group replace rule, correctly on the
+general path), snappy 7.5%, relabel ~14.7% across
+`process`/`LabelSet`/`matches`, mimalloc ~4-5%.
+
+== Allocation profile (live workload, heaptrack --record-only, 150 s)
+
+6.14M allocation calls (~37.6k/s) while scraping 1.25M samples and
+sending 626 RW2.0 batches; peak heap 19.3M. Top sites:
+
+[cols="1,2,4",options="header"]
+|===
+|Calls |Site |What it is
+
+|1,086,000 (18%)
+|`remote_write.rs` `Endpoint::run` → `flush`
+|The v2 encode path: one `labels_refs` `Vec<u32>` *per series per batch*
+(~1,735 allocs/batch) plus the symbols `Vec<String>`, the interning
+`HashMap` and its double `to_owned` per unique string.
+
+|~1,249,000 (20%)
+|`parse` via `scrape_once` (`scrape.rs:613`)
+|Per-series containers: the `Vec<Label>` (capacity 12) and the
+one-element `vec![Sample]` — two heap allocations for every series on
+every scrape.
+
+|641,908 (10%)
+|`parser.rs:207` metric-name label
+|Metric names longer than 24 bytes exceed the CompactString inline
+buffer (histogram/bucket names like `request_duration_seconds_bucket`)
+— ~half of all series in this corpus.
+
+|551,258 (9%)
+|`scrape_once` parse path
+|Long label values (>24 bytes) spilling to the heap.
+|===
+
+== Candidates
+
+=== 1. Single-pass RW2.0 encoder with cheap interning — status: open
+
+Target: the ~23% live CPU block plus its allocations. Files:
+`src/model.rs`, `src/remote_write.rs`.
+
+* Extend the hand-rolled encoder to `WriteRequestV2`: write the symbols
+  and series directly into the output buffer in one pass — the
+  intermediate `WriteRequestV2` struct, its `Vec<String>` symbols table
+  and `Vec<u32>` labels_refs disappear entirely.
+* Replace the `HashMap<String, u32>` interning (SipHash + double
+  `to_owned` per unique string) with an FNV/FxHash-style map keyed on
+  borrowed `&str` from the batch. No new dependency needed — an FNV u64
+  over the string plus a small open-addressing table, or `HashMap<&str,
+  u32, BuildHasherDefault<FxLikeHasher>>` with a hand-rolled hasher.
+* Parity test: byte-equality against the current `encode_v2` +
+  prost-derive output for a corpus batch.
+
+=== 2. Fetch scrape bodies without the lossy copy — status: open
+
+Target: ~4.3% live CPU + one full-body allocation/copy per scrape.
+File: `src/scrape.rs` (`fetch`).
+
+`response.text()` runs encoding detection and `String::from_utf8_lossy`,
+which copies the whole body. Switch to `response.bytes()` +
+`std::str::from_utf8` (fast SIMD validation, zero copy; reject invalid
+UTF-8 as a scrape error like Prometheus does). The retained-body
+compression consumes `&[u8]` anyway.
+
+=== 3. Faster series hashing in the staleness tracker — status: open
+
+Target: part of the 12.6% `scrape_loop` block. File: `src/scrape.rs`.
+
+`hash_labels` runs byte-at-a-time FNV-1a over every label of every series
+each scrape (~1 byte/cycle). The hashes are only ever compared within the
+process lifetime, so any stable-within-process 64-bit hash qualifies:
+process 8-byte chunks with wrapping multiplies (FxHash-style) or fold the
+existing FNV over `u64` words. No new dependency required.
+
+=== 4. Single-sample series in the internal model — status: open
+
+Target: ~20% of live allocations (one `vec![Sample]` per series per
+scrape) plus 24 bytes per series of `Vec` overhead in every batch.
+Files: `src/model.rs`, `src/parser.rs`, `src/scrape.rs`,
+`src/remote_write.rs`.
+
+The pipeline creates exactly one sample per series per scrape (the
+parser emits one `TimeSeries` per sample line; staleness markers are
+single-sample too). Replace `samples: Vec<Sample>` with `sample: Sample`
+in the *internal* series type; the hand-rolled encoders write it as a
+repeated field of one on the wire (wire-format identical). The prost
+derives move to test-only shadow types for decode/parity. Combines
+naturally with candidate 1 since the v2 encoder is being rewritten
+anyway.
+
+=== 5. Deferred / rejected
+
+* *zstd for retained bodies* — rejected in round 2 (C dependency in the
+  musl build); unchanged.
+* *Further parser work* — parse is down to 7% live; diminishing returns.
+* *`sort_labels`* — 2% live; revisit only if rounds above land short.
+
+== Verification
+
+* Candidate 1: byte-parity test vs the prost-derive v2 output; live
+  harness A/B (this document's setup) watching CPU during the measurement
+  window and `remote_write_failed_batches_total == 0` against the real
+  local Mimir.
+* Candidate 2: scrape correctness covered by existing tests + live
+  harness; confirm `Utf8Chunks` disappears from the profile.
+* Candidate 3: staleness tests already cover hash behavior end-to-end
+  (hashes are internal-only).
+* Per-package: hyperfine on the training workload (v1 path) and a
+  120 s perf capture on the live harness (v2 path), tests + clippy,
+  commit per package with measured numbers.
