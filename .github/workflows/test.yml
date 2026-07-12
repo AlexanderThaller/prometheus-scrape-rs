@@ -25,9 +25,13 @@ jobs:
 
       # https://github.com/taiki-e/install-action
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@daa3c1f1f9a9d46f686d9fc2f65773d0c293688b # v2.62.44
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: nextest
+        env:
+          # Authenticate the action's GitHub API/release requests so they
+          # aren't rate-limited to anonymous 403s.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # https://github.com/Swatinem/rust-cache
       - name: Cache cargo registry and build artifacts
