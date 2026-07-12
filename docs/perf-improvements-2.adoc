@@ -120,7 +120,25 @@ buffer (histogram/bucket names like `request_duration_seconds_bucket`)
 
 == Candidates
 
-=== 1. Single-pass RW2.0 encoder with cheap interning — status: open
+=== 1. Single-pass RW2.0 encoder with cheap interning — status: *done, −22% total live CPU*
+
+Measured 2026-07-12/13 on the live harness (120 s perf @ 4999 Hz, identical
+load, NAS Mimir accepting all batches, zero retries):
+
+* baseline (prost + SipHash interning): 9048 samples, encode path ~23%;
+* single-pass with borrowed-key Fx map: 8171 samples (−10% total) — but
+  `intern` at 21.5%: the map *probe* (SIMD group scan + cache misses on
+  ~670k lookups/round), not the hash, dominates;
+* plus previous-series memoization: *7075 samples (−22% total CPU)*,
+  `intern` down to 5.9% — consecutive series share label names and most
+  values, so an equal-string compare against the previous series reuses
+  the ref without touching the map. Reuse cannot change interning order,
+  so output stays byte-identical (parity-tested, including a corpus-scale
+  batch).
+
+Absolute encode-path cost fell ~47%. The per-series `labels_refs` Vecs,
+owned symbol `String`s and the SipHash map are gone; `V2Scratch` holds the
+one reusable flat ref buffer.
 
 Target: the ~23% live CPU block plus its allocations. Files:
 `src/model.rs`, `src/remote_write.rs`.

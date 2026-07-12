@@ -22,7 +22,6 @@ use std::{
 };
 
 use anyhow::Context as _;
-use prost::Message as _;
 use tokio::{
     sync::mpsc,
     task::JoinHandle,
@@ -42,9 +41,7 @@ use crate::{
     },
     model::{
         TimeSeries,
-        TimeSeriesV2,
         WriteRequest,
-        WriteRequestV2,
         sort_labels,
     },
     relabel::{
@@ -201,8 +198,9 @@ impl Endpoint {
         info!(endpoint = self.name, "remote-write sender started");
         let mut pending: Vec<TimeSeries> = Vec::new();
         let mut pending_samples = 0usize;
-        // Reused encode buffer; snappy output is allocated per request.
+        // Reused encode buffers; snappy output is allocated per request.
         let mut proto_buf = Vec::new();
+        let mut scratch = V2Scratch::default();
         let mut encoder = snap::raw::Encoder::new();
         let mut deadline = tokio::time::interval(self.batch_send_deadline);
         deadline.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -216,7 +214,7 @@ impl Endpoint {
                         while pending_samples >= self.max_samples_per_send {
                             let (chunk, samples) = split_batch(&mut pending, self.max_samples_per_send);
                             pending_samples -= samples;
-                            self.flush(chunk, &mut proto_buf, &mut encoder).await;
+                            self.flush(chunk, &mut proto_buf, &mut scratch, &mut encoder).await;
                             deadline.reset();
                         }
                     }
@@ -226,13 +224,13 @@ impl Endpoint {
                     if !pending.is_empty() {
                         let batch = std::mem::take(&mut pending);
                         pending_samples = 0;
-                        self.flush(batch, &mut proto_buf, &mut encoder).await;
+                        self.flush(batch, &mut proto_buf, &mut scratch, &mut encoder).await;
                     }
                 }
             }
         }
         if !pending.is_empty() {
-            self.flush(std::mem::take(&mut pending), &mut proto_buf, &mut encoder)
+            self.flush(std::mem::take(&mut pending), &mut proto_buf, &mut scratch, &mut encoder)
                 .await;
         }
         info!(endpoint = self.name, "remote-write sender stopped");
@@ -242,6 +240,7 @@ impl Endpoint {
         &self,
         mut batch: Vec<TimeSeries>,
         proto_buf: &mut Vec<u8>,
+        scratch: &mut V2Scratch,
         encoder: &mut snap::raw::Encoder,
     ) {
         if !self.write_relabel_configs.is_empty() {
@@ -270,10 +269,7 @@ impl Endpoint {
                 WriteRequest { timeseries: batch }.encode_into(proto_buf);
             }
             ProtobufMessage::WriteRequestV2 => {
-                if let Err(err) = encode_v2(batch).encode(proto_buf) {
-                    error!(endpoint = self.name, %err, "encoding write request failed; dropping batch");
-                    return;
-                }
+                encode_v2_into(&batch, proto_buf, scratch);
             }
         }
         // `Bytes` so the per-attempt body handoff below is a refcount
@@ -396,47 +392,159 @@ enum SendError {
     Unrecoverable(String),
 }
 
-/// Convert a 1.0 batch to a 2.0 request: every distinct label name and
+/// FxHash-style hasher for the symbol-interning map. The std default
+/// `SipHash` was ~12% of live CPU on the remote-write path; label strings
+/// are short, hashes never leave the process, and hash-flooding is not a
+/// concern for data the agent scraped itself.
+#[derive(Debug, Default)]
+struct FxHasher {
+    hash: u64,
+}
+
+impl FxHasher {
+    const SEED: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
+    fn add(&mut self, word: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ word).wrapping_mul(Self::SEED);
+    }
+}
+
+impl std::hash::Hasher for FxHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        let (chunks, rest) = bytes.as_chunks::<8>();
+        for chunk in chunks {
+            self.add(u64::from_le_bytes(*chunk));
+        }
+        if !rest.is_empty() {
+            let mut word = [0u8; 8];
+            word[..rest.len()].copy_from_slice(rest);
+            self.add(u64::from_le_bytes(word));
+        }
+        // Fold in the length so zero-padded tails stay distinct.
+        self.add(bytes.len() as u64);
+    }
+
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+type FxMap<'a> = std::collections::HashMap<&'a str, u32, std::hash::BuildHasherDefault<FxHasher>>;
+
+/// Reusable buffers for the v2 encoder, held across batches by the sender
+/// task so steady state allocates nothing per series.
+#[derive(Debug, Default)]
+struct V2Scratch {
+    /// Flat stream of symbol refs for the whole batch, in series order —
+    /// replaces the former per-series `labels_refs: Vec<u32>`.
+    refs: Vec<u32>,
+}
+
+/// Single-pass remote-write 2.0 encoder: every distinct label name and
 /// value is written once into the symbols table and series carry pairs of
-/// symbol indices. Copies are bounded by unique strings per request, not by
-/// series count — the protocol-level cure for label duplication.
-fn encode_v2(batch: Vec<TimeSeries>) -> WriteRequestV2 {
-    // symbols[0] MUST be the empty string per the 2.0 spec.
-    let mut symbols: Vec<String> = vec![String::new()];
-    let mut index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
-    let intern = |symbols: &mut Vec<String>,
-                  index: &mut std::collections::HashMap<String, u32>,
-                  text: &str|
-     -> u32 {
+/// symbol indices. Byte-identical to prost-encoding the `WriteRequestV2`
+/// the previous implementation built (verified by test), without the
+/// intermediate struct: no owned symbol `String`s, no per-series ref
+/// `Vec`s — those were 18% of all live allocations.
+fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scratch) {
+    use crate::model::{
+        put_varint,
+        varint_len,
+    };
+
+    fn intern<'a>(symbols: &mut Vec<&'a str>, index: &mut FxMap<'a>, text: &'a str) -> u32 {
         if text.is_empty() {
+            // symbols[0] MUST be the empty string per the 2.0 spec.
             return 0;
         }
         if let Some(reference) = index.get(text) {
             return *reference;
         }
         let reference = u32::try_from(symbols.len()).unwrap_or(0);
-        symbols.push(text.to_owned());
-        index.insert(text.to_owned(), reference);
+        symbols.push(text);
+        index.insert(text, reference);
         reference
-    };
+    }
 
-    let timeseries = batch
-        .into_iter()
-        .map(|series| {
-            let mut labels_refs = Vec::with_capacity(series.labels.len() * 2);
-            for label in &series.labels {
-                labels_refs.push(intern(&mut symbols, &mut index, &label.name));
-                labels_refs.push(intern(&mut symbols, &mut index, &label.value));
+    scratch.refs.clear();
+    let mut symbols: Vec<&str> = Vec::with_capacity(1024);
+    symbols.push("");
+    let mut index = FxMap::with_capacity_and_hasher(1024, std::hash::BuildHasherDefault::default());
+
+    // Pass 1: intern all strings and collect the flat ref stream.
+    // Consecutive series overwhelmingly share label names (same exposition
+    // order) and target-level values (job/instance/...), so each label is
+    // first compared against the previous series' label at the same
+    // position — an equal string reuses the ref without touching the map,
+    // which the profile showed dominated this pass. Reuse cannot change
+    // interning order: it only fires for strings already interned.
+    let mut prev: Option<&TimeSeries> = None;
+    for series in batch {
+        let base = scratch.refs.len();
+        let prev_matches = prev.is_some_and(|p| p.labels.len() == series.labels.len());
+        for (position, label) in series.labels.iter().enumerate() {
+            let mut name_ref = None;
+            let mut value_ref = None;
+            if prev_matches {
+                #[expect(clippy::unwrap_used, reason = "prev_matches implies prev exists")]
+                let previous = &prev.unwrap().labels[position];
+                let prev_base = base - 2 * series.labels.len() + 2 * position;
+                if previous.name == label.name {
+                    name_ref = Some(scratch.refs[prev_base]);
+                }
+                if previous.value == label.value {
+                    value_ref = Some(scratch.refs[prev_base + 1]);
+                }
             }
-            TimeSeriesV2 {
-                labels_refs,
-                samples: series.samples,
+            let name_ref = name_ref
+                .unwrap_or_else(|| intern(&mut symbols, &mut index, &label.name));
+            let value_ref = value_ref
+                .unwrap_or_else(|| intern(&mut symbols, &mut index, &label.value));
+            scratch.refs.push(name_ref);
+            scratch.refs.push(value_ref);
+        }
+        prev = Some(series);
+    }
+
+    // Field 4: repeated string symbols, in interning order. Repeated
+    // fields encode every element, including the empty string at index 0.
+    for symbol in &symbols {
+        buf.push(0x22);
+        put_varint(symbol.len() as u64, buf);
+        buf.extend_from_slice(symbol.as_bytes());
+    }
+
+    // Field 5: repeated TimeSeriesV2.
+    let mut offset = 0usize;
+    for series in batch {
+        let refs = &scratch.refs[offset..offset + series.labels.len() * 2];
+        offset += refs.len();
+        let packed: usize = refs.iter().map(|&r| varint_len(u64::from(r))).sum();
+        let mut series_len = 0usize;
+        if !refs.is_empty() {
+            series_len += 1 + varint_len(packed as u64) + packed;
+        }
+        for sample in &series.samples {
+            let len = sample.wire_len();
+            series_len += 1 + varint_len(len as u64) + len;
+        }
+        buf.push(0x2a);
+        put_varint(series_len as u64, buf);
+        // Field 1: packed uint32 labels_refs (omitted when empty, matching
+        // prost's packed-repeated encoding).
+        if !refs.is_empty() {
+            buf.push(0x0a);
+            put_varint(packed as u64, buf);
+            for &reference in refs {
+                put_varint(u64::from(reference), buf);
             }
-        })
-        .collect();
-    WriteRequestV2 {
-        symbols,
-        timeseries,
+        }
+        // Field 2: repeated Sample.
+        for sample in &series.samples {
+            buf.push(0x12);
+            put_varint(sample.wire_len() as u64, buf);
+            sample.put_fields(buf);
+        }
     }
 }
 
@@ -460,11 +568,125 @@ fn split_batch(pending: &mut Vec<TimeSeries>, max_samples: usize) -> (Vec<TimeSe
 
 #[cfg(test)]
 mod tests {
+    use prost::Message as _;
+
     use super::*;
     use crate::model::{
         Label,
         Sample,
+        TimeSeriesV2,
+        WriteRequestV2,
     };
+
+    /// Reference v2 encoder via the prost-derived types — the previous
+    /// production implementation, kept to pin the wire format of
+    /// [`encode_v2_into`].
+    fn encode_v2(batch: Vec<TimeSeries>) -> WriteRequestV2 {
+        let mut symbols: Vec<String> = vec![String::new()];
+        let mut index: std::collections::HashMap<String, u32> = std::collections::HashMap::new();
+        let mut intern = |symbols: &mut Vec<String>, text: &str| -> u32 {
+            if text.is_empty() {
+                return 0;
+            }
+            if let Some(reference) = index.get(text) {
+                return *reference;
+            }
+            let reference = u32::try_from(symbols.len()).unwrap_or(0);
+            symbols.push(text.to_owned());
+            index.insert(text.to_owned(), reference);
+            reference
+        };
+
+        let timeseries = batch
+            .into_iter()
+            .map(|series| {
+                let mut labels_refs = Vec::with_capacity(series.labels.len() * 2);
+                for label in &series.labels {
+                    labels_refs.push(intern(&mut symbols, &label.name));
+                    labels_refs.push(intern(&mut symbols, &label.value));
+                }
+                TimeSeriesV2 {
+                    labels_refs,
+                    samples: series.samples,
+                }
+            })
+            .collect();
+        WriteRequestV2 {
+            symbols,
+            timeseries,
+        }
+    }
+
+    /// The single-pass encoder must be byte-identical to prost-encoding
+    /// the reference `WriteRequestV2`, across interning order, shared
+    /// symbols, the reserved empty-string ref, packed ref fields, empty
+    /// series and skipped default sample fields.
+    #[test]
+    fn encode_v2_into_matches_reference() {
+        let batches: Vec<Vec<TimeSeries>> = vec![
+            Vec::new(),
+            vec![TimeSeries {
+                labels: Vec::new(),
+                samples: Vec::new(),
+            }],
+            vec![
+                TimeSeries {
+                    labels: vec![
+                        Label::new("__name__", "http_requests_total"),
+                        Label::new("job", "node"),
+                        Label::new("empty", ""),
+                        Label::new("long", "x".repeat(300)),
+                    ],
+                    samples: vec![
+                        Sample {
+                            value: 1027.0,
+                            timestamp: 1_395_066_363_000,
+                        },
+                        Sample {
+                            value: 0.0,
+                            timestamp: 0,
+                        },
+                    ],
+                },
+                TimeSeries {
+                    labels: vec![
+                        Label::new("__name__", "http_requests_total"),
+                        Label::new("job", "other"),
+                    ],
+                    samples: vec![Sample {
+                        value: crate::model::stale_nan(),
+                        timestamp: -1,
+                    }],
+                },
+            ],
+        ];
+        for batch in batches {
+            let mut buf = Vec::new();
+            let mut scratch = V2Scratch::default();
+            encode_v2_into(&batch, &mut buf, &mut scratch);
+            let reference = encode_v2(batch).encode_to_vec();
+            assert_eq!(buf, reference);
+        }
+    }
+
+    /// A corpus-scale batch exercises multi-byte varint symbol refs and
+    /// length delimiters.
+    #[test]
+    fn encode_v2_into_matches_reference_on_large_batch() {
+        let body = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("pgo-corpus/cilium-agent.prom"),
+        );
+        let Ok(body) = body else {
+            // Corpus is a local convenience, not a repo guarantee.
+            return;
+        };
+        let batch = crate::parser::parse(&body, 1_700_000_000_000, true).expect("corpus parses");
+        let mut buf = Vec::new();
+        let mut scratch = V2Scratch::default();
+        encode_v2_into(&batch, &mut buf, &mut scratch);
+        let reference = encode_v2(batch).encode_to_vec();
+        assert_eq!(buf, reference);
+    }
 
     fn series(name: &str, samples: usize) -> TimeSeries {
         TimeSeries {

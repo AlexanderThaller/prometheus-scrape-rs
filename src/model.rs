@@ -171,7 +171,7 @@ const TAG1_DOUBLE: u8 = 0x09;
 const TAG2_VARINT: u8 = 0x10;
 
 /// Encoded size of `value` as a protobuf varint (prost's branch-free form).
-fn varint_len(value: u64) -> usize {
+pub(crate) fn varint_len(value: u64) -> usize {
     (((value | 1).leading_zeros() as usize ^ 63) * 9 + 73) / 64
 }
 
@@ -179,7 +179,7 @@ fn varint_len(value: u64) -> usize {
     clippy::cast_possible_truncation,
     reason = "bytes are masked to 7 bits before the cast"
 )]
-fn put_varint(mut value: u64, buf: &mut Vec<u8>) {
+pub(crate) fn put_varint(mut value: u64, buf: &mut Vec<u8>) {
     while value >= 0x80 {
         buf.push((value & 0x7f) as u8 | 0x80);
         value >>= 7;
@@ -219,7 +219,7 @@ impl Label {
 }
 
 impl Sample {
-    fn wire_len(&self) -> usize {
+    pub(crate) fn wire_len(&self) -> usize {
         let mut len = 0;
         if self.value != 0.0 {
             len += 9;
@@ -228,6 +228,20 @@ impl Sample {
             len += 1 + varint_len(int64_bits(self.timestamp));
         }
         len
+    }
+
+    /// Write the sample's fields (without the message header) — shared by
+    /// the v1 and v2 encoders; the wire layout of `Sample` is identical in
+    /// both protocols.
+    pub(crate) fn put_fields(&self, buf: &mut Vec<u8>) {
+        if self.value != 0.0 {
+            buf.push(TAG1_DOUBLE);
+            buf.extend_from_slice(&self.value.to_le_bytes());
+        }
+        if self.timestamp != 0 {
+            buf.push(TAG2_VARINT);
+            put_varint(int64_bits(self.timestamp), buf);
+        }
     }
 }
 
@@ -271,14 +285,7 @@ impl WriteRequest {
             for sample in &series.samples {
                 buf.push(TAG2_LEN);
                 put_varint(sample.wire_len() as u64, buf);
-                if sample.value != 0.0 {
-                    buf.push(TAG1_DOUBLE);
-                    buf.extend_from_slice(&sample.value.to_le_bytes());
-                }
-                if sample.timestamp != 0 {
-                    buf.push(TAG2_VARINT);
-                    put_varint(int64_bits(sample.timestamp), buf);
-                }
+                sample.put_fields(buf);
             }
         }
     }
