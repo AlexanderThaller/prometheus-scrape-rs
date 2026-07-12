@@ -161,12 +161,33 @@ to accept RW2 (experimental flag) against a dev tenant. 40–60% smaller
 payloads → less varint, snappy and network work. No code changes required;
 `encode_v2` already exists and is tested.
 
-=== 8. Snappy-compressed retained bodies — status: open (optional)
+=== 8. Snappy-compressed retained bodies — status: *done*
 
-`SeriesTracker` keeps one raw exposition body per target for staleness
-re-derivation. Compressing it (~4–5x on exposition text) saves an
-estimated ~30 MiB at 311k series, at the cost of one snappy compress per
-scrape and a decompress on vanish events only.
+`SeriesTracker` keeps one exposition body per target for staleness
+re-derivation; it is now stored snappy-compressed and decompressed only on
+vanish events. At ~40 MiB of retained bodies (311k series) the 7.1x ratio
+leaves ~5.6 MiB — roughly −35 MiB RSS per replica, to be confirmed live.
+
+Codec bakeoff on the real pgo-corpus bodies (2026-07-12, 1.9 MB corpus,
+300 rounds):
+
+[cols="1,1,1,1",options="header"]
+|===
+|codec |ratio |compress |decompress
+
+|snappy |7.12x |2195 MB/s |4726 MB/s
+|lz4 (`lz4_flex`) |7.66x |1769 MB/s |5546 MB/s
+|zstd −1 |11.54x |1261 MB/s |3393 MB/s
+|zstd −3 |11.76x |1019 MB/s |3260 MB/s
+|===
+
+Decision: *snappy*. Compression speed dominates this use case (one
+compress per scrape, ~23 µs per 50 KiB body; decompress is rare), snappy
+is already a dependency (remote-write), and lz4's +7% ratio does not
+justify a new crate. zstd's 11.5x would roughly halve the remaining
+footprint but adds a C dependency to the static musl build and halves
+throughput — revisit only if retained-body RSS ever matters at 10x the
+current scale.
 
 == Round result (2026-07-12)
 
@@ -184,7 +205,8 @@ profile confirms the targeted symbols shrank in absolute terms:
 The allocator is now the largest remaining block (~16.5% of the smaller
 total ≈ 0.81 s), which makes the CompactString experiment (candidate 6)
 the clear next lever. Candidate 5 (managedFields) needs its dev-replica
-RSS A/B; candidates 7–8 remain open.
+RSS A/B; candidate 7 (remote-write 2.0) remains open; candidate 8
+(compressed retained bodies) shipped after a codec bakeoff.
 
 == Verification
 
