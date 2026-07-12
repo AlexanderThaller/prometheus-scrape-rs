@@ -1931,6 +1931,7 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "md-5",
+ "memchr",
  "mimalloc",
  "prost",
  "regex",
