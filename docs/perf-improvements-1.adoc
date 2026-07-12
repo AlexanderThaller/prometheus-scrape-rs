@@ -144,7 +144,7 @@ labels are untouched — pod annotations become
 MiB at cluster pod counts; verify by deploying one dev replica and
 comparing RSS against an untouched one.
 
-=== 6. CompactString-backed labels — status: *implemented on branch `compactstring-labels`, awaiting live A/B*
+=== 6. CompactString-backed labels — status: *merged into `perf-improvements-1`*
 
 Target: the ~14.5% allocator share. Inline ≤24-byte strings with no atomic
 refcounts — attacks the same allocations as the reverted Bytes-labels
@@ -170,10 +170,10 @@ derives and the decode path working. Parser and relabel produce
 `CompactString` directly from slices (no `String` intermediates on hot
 paths).
 
-*Decision pending the live-cluster A/B* — deploy `compactstring-labels`
-to one dev replica against a `perf-improvements-1` replica and compare
-per-replica CPU (the Bytes-labels experiment was local-neutral but +20%
-live).
+Merged 2026-07-12. Watch per-replica CPU on the next cluster rollout
+against the pre-merge numbers — the Bytes-labels experiment was
+local-neutral but +20% live, so a live regression here means reverting
+commit `bb17711`.
 
 === 7. Remote-write 2.0 to Mimir — status: open (config only)
 
