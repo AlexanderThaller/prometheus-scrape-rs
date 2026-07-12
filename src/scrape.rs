@@ -509,7 +509,8 @@ impl SeriesTracker {
         let Ok(body) = std::str::from_utf8(&body) else {
             warn!(
                 url = target.url,
-                "retained scrape body is not valid UTF-8 after decompression; staleness markers skipped"
+                "retained scrape body is not valid UTF-8 after decompression; staleness markers \
+                 skipped"
             );
             return Vec::new();
         };
