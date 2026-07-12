@@ -60,6 +60,39 @@ pub struct AnchoredRegex {
     /// The original pattern as written in the config.
     pub source: String,
     pub regex: regex::Regex,
+    kind: PatternKind,
+}
+
+/// Structural classification of a pattern, decided once at construction.
+/// Operator configs are dominated by literal and literal-prefix patterns;
+/// matching those with plain string comparisons skips the regex engine on
+/// the per-sample hot path.
+#[derive(Debug, Clone)]
+enum PatternKind {
+    /// No metacharacters: an anchored match is string equality.
+    Literal,
+    /// A literal followed by `.*`: an anchored match is `starts_with`,
+    /// provided the remainder has no newline (`.` does not match `\n`).
+    LiteralPrefix(String),
+    /// Anything else goes through the regex engine.
+    General,
+}
+
+/// Characters with special meaning in a regex pattern.
+const REGEX_META: &[char] = &[
+    '.', '^', '$', '*', '+', '?', '(', ')', '[', ']', '{', '}', '|', '\\',
+];
+
+fn classify(pattern: &str) -> PatternKind {
+    if !pattern.contains(REGEX_META) {
+        return PatternKind::Literal;
+    }
+    if let Some(prefix) = pattern.strip_suffix(".*")
+        && !prefix.contains(REGEX_META)
+    {
+        return PatternKind::LiteralPrefix(prefix.to_owned());
+    }
+    PatternKind::General
 }
 
 impl AnchoredRegex {
@@ -67,7 +100,24 @@ impl AnchoredRegex {
         Ok(Self {
             source: pattern.to_owned(),
             regex: regex::Regex::new(&format!("^(?:{pattern})$"))?,
+            kind: classify(pattern),
         })
+    }
+
+    /// Whether the anchored pattern matches all of `value`.
+    #[must_use]
+    pub fn matches(&self, value: &str) -> bool {
+        match &self.kind {
+            PatternKind::Literal => value == self.source,
+            PatternKind::LiteralPrefix(prefix) => {
+                // `.*` does not cross newlines, and `$` only matches at the
+                // very end, so a newline anywhere in the remainder means the
+                // anchored regex would not match.
+                value.strip_prefix(prefix.as_str())
+                    .is_some_and(|rest| !rest.contains('\n'))
+            }
+            PatternKind::General => self.regex.is_match(value),
+        }
     }
 }
 
@@ -213,13 +263,13 @@ fn apply(set: &mut LabelSet, config: &RelabelConfig, val: &mut String) -> bool {
         }
         Action::Keep => {
             let joined = set.join(&config.source_labels, &config.separator, val);
-            if !re.is_match(joined) {
+            if !config.regex.matches(joined) {
                 return false;
             }
         }
         Action::Drop => {
             let joined = set.join(&config.source_labels, &config.separator, val);
-            if re.is_match(joined) {
+            if config.regex.matches(joined) {
                 return false;
             }
         }
@@ -255,10 +305,10 @@ fn apply(set: &mut LabelSet, config: &RelabelConfig, val: &mut String) -> bool {
             }
         }
         Action::LabelDrop => {
-            set.labels.retain(|label| !re.is_match(&label.name));
+            set.labels.retain(|label| !config.regex.matches(&label.name));
         }
         Action::LabelKeep => {
-            set.labels.retain(|label| re.is_match(&label.name));
+            set.labels.retain(|label| config.regex.matches(&label.name));
         }
         Action::Lowercase => {
             let joined = set.join(&config.source_labels, &config.separator, val);
@@ -307,6 +357,26 @@ fn apply_replace(set: &mut LabelSet, config: &RelabelConfig, val: &mut String) {
             }
             return;
         }
+    }
+    // Fast path for literal regexes with plain replacements (e.g. tagging
+    // rules like `mac_address` -> `ap_name`): the anchored match is string
+    // equality and there are no captures to expand.
+    if matches!(config.regex.kind, PatternKind::Literal)
+        && !config.target_label.contains('$')
+        && !config.replacement.contains('$')
+    {
+        if joined != config.regex.source {
+            return;
+        }
+        if !is_valid_label_name(&config.target_label) {
+            return;
+        }
+        if config.replacement.is_empty() {
+            set.remove(&config.target_label);
+        } else {
+            set.set(&config.target_label, config.replacement.clone());
+        }
+        return;
     }
     // No match leaves the label set untouched.
     let Some(caps) = config.regex.regex.captures(joined) else {
@@ -420,6 +490,116 @@ mod tests {
         .expect("kept");
         assert_eq!(get(&out, "gone"), None);
         assert_eq!(get(&out, "keep"), Some("x"));
+    }
+
+    /// The literal / literal-prefix fast paths must agree with the regex
+    /// engine for every match decision, including anchoring and newline
+    /// edge cases.
+    #[test]
+    fn pattern_fast_paths_match_regex_engine() {
+        // (pattern, values to check) — every pattern is evaluated both via
+        // `matches` (fast path when classified) and the raw anchored regex.
+        let cases: &[(&str, &[&str])] = &[
+            // Literals: anchored match is equality, substrings must fail.
+            ("metrics", &["metrics", "metrics2", "xmetrics", "metric", ""]),
+            (
+                "D2:21:F9:90:8D:39",
+                &["D2:21:F9:90:8D:39", "D2:21:F9:90:8D:39x", "d2:21:f9:90:8d:39"],
+            ),
+            ("", &["", "x"]),
+            // Literal prefixes: starts_with, but `.` must not cross newlines.
+            (
+                "__tmp_.*",
+                &["__tmp_", "__tmp_hash", "x__tmp_", "__tmp", "__tmp_a\nb"],
+            ),
+            (
+                "go_gc_duration_seconds.*",
+                &["go_gc_duration_seconds", "go_gc_duration_seconds_sum", "go_gc"],
+            ),
+            // General patterns for control.
+            ("(Failed|Succeeded)", &["Failed", "Succeeded", "Running"]),
+            ("(.+);", &["a;", ";", "a;b"]),
+        ];
+        for (pattern, values) in cases {
+            let regex = AnchoredRegex::new(pattern).expect("valid pattern");
+            for value in *values {
+                assert_eq!(
+                    regex.matches(value),
+                    regex.regex.is_match(value),
+                    "pattern {pattern:?} value {value:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn replace_literal_regex_fast_path_matches_general_semantics() {
+        // Literal regex, literal replacement: the pikvm tagging rule shape.
+        let tag = RelabelConfig {
+            source_labels: vec!["mac".to_owned()],
+            regex: AnchoredRegex::new("AA:BB").unwrap(),
+            target_label: "ap".to_owned(),
+            replacement: "Office AP".to_owned(),
+            ..config(Action::Replace)
+        };
+        // Match: target set to the replacement.
+        let out = process(labels(&[("mac", "AA:BB")]), std::slice::from_ref(&tag)).unwrap();
+        assert_eq!(get(&out, "ap"), Some("Office AP"));
+        // No match (substring): labels untouched.
+        let out = process(labels(&[("mac", "AA:BB:CC")]), std::slice::from_ref(&tag)).unwrap();
+        assert_eq!(get(&out, "ap"), None);
+
+        // Empty replacement removes the target label, like the general path.
+        let mut wipe = tag.clone();
+        wipe.replacement = String::new();
+        let out = process(labels(&[("mac", "AA:BB"), ("ap", "stale")]), &[wipe]).unwrap();
+        assert_eq!(get(&out, "ap"), None);
+
+        // `$` in the replacement falls back to the general path: group 1
+        // does not exist on a literal pattern, so it expands to empty and
+        // the target label is removed.
+        let mut expand = tag.clone();
+        expand.replacement = "${1}".to_owned();
+        let out = process(
+            labels(&[("mac", "AA:BB"), ("ap", "stale")]),
+            std::slice::from_ref(&expand),
+        )
+        .unwrap();
+        assert_eq!(get(&out, "ap"), None);
+
+        // Invalid target label name: no change.
+        let mut bad = tag.clone();
+        bad.target_label = "0bad".to_owned();
+        let out = process(labels(&[("mac", "AA:BB")]), &[bad]).unwrap();
+        assert_labels_eq(out, labels(&[("mac", "AA:BB")]));
+    }
+
+    #[test]
+    fn keep_drop_literal_prefix_fast_path() {
+        let drop_prefix = RelabelConfig {
+            source_labels: vec!["__name__".to_owned()],
+            regex: AnchoredRegex::new("go_gc_.*").unwrap(),
+            ..config(Action::Drop)
+        };
+        assert!(
+            process(
+                labels(&[("__name__", "go_gc_duration_seconds")]),
+                std::slice::from_ref(&drop_prefix)
+            )
+            .is_none()
+        );
+        assert!(
+            process(
+                labels(&[("__name__", "node_load1")]),
+                std::slice::from_ref(&drop_prefix)
+            )
+            .is_some()
+        );
+        // Newline after the prefix: the anchored regex would not match, so
+        // the series must be kept.
+        assert!(
+            process(labels(&[("__name__", "go_gc_x\ny")]), &[drop_prefix]).is_some()
+        );
     }
 
     #[test]

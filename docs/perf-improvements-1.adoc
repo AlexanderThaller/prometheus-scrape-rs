@@ -105,10 +105,15 @@ Target was ~11% CPU. Files: `src/model.rs`, `src/remote_write.rs`,
 * Side benefit: frees `Label` from prost's `String` field requirement,
   unblocking candidate 6.
 
-=== 3. Relabel literal-regex fast paths — status: open
+=== 3. Relabel literal-regex fast paths — status: *done, 1.10x*
 
-Target: large win on the pikvm deployment, harmless elsewhere. File:
-`src/relabel.rs`.
+Measured 2026-07-12 (hyperfine, 10 runs, training workload): 5.435 s →
+4.947 s ± 0.025, *cumulative ~1.22x vs the round baseline*. The training
+chain has two of four rules on the new fast paths (`LiteralPrefix` drop +
+labeldrop); the pikvm deployment (three literal replace rules per sample)
+should gain more.
+
+File: `src/relabel.rs`.
 
 * Classify patterns in `AnchoredRegex::new`: `Literal` (no regex
   metacharacters), `LiteralPrefix` (literal followed by `.*`), `General`.
