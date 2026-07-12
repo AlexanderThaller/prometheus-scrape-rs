@@ -133,15 +133,16 @@ from `Bytes` clone by refcount. Removes one payload-sized allocation + copy
 per batch send plus one per retry. Not on the training-workload path, so no
 hyperfine delta — the win shows up per remote-write batch in production.
 
-=== 5. k8s reflectors: strip `managedFields` — status: open
+=== 5. k8s reflectors: strip `managedFields` — status: *implemented, awaiting cluster A/B*
 
 Production RSS lever. File: `src/sd_k8s.rs`.
 
-Wrap the watcher stream with
-`kube::runtime::WatchStreamExt::modify(|obj| obj.meta_mut().managed_fields = None)`
-before it feeds the reflector. Do *not* touch annotations or labels — pod
-annotations become `__meta_kubernetes_pod_annotation_*` relabeling inputs.
-Expected: tens of MiB at cluster pod counts; zero behavioral risk.
+The watcher stream now clears `metadata.managedFields` via
+`WatchStreamExt::modify` before it feeds the reflector. Annotations and
+labels are untouched — pod annotations become
+`__meta_kubernetes_pod_annotation_*` relabeling inputs. Expected: tens of
+MiB at cluster pod counts; verify by deploying one dev replica and
+comparing RSS against an untouched one.
 
 === 6. CompactString-backed labels — status: open (experiment)
 
