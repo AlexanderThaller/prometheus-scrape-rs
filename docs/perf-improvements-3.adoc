@@ -312,6 +312,28 @@ No-regression guards:
   agent CPU* — confirming the incremental per-package story under
   same-conditions pairing.
 
+=== Production confirmation (2026-07-13)
+
+Custom image built from `deccd80`
+(`docker.io/athallerde/prometheus-scrape-rs:perf-improvements-3-deccd80`)
+rolled to both replicas of `prometheus-agent` in
+`prometheus-infrastructure`. Measured ~20–25 min post-rollout via a
+5-minute `process_cpu_seconds_total` window at 326.5k tracked series and
+29.1k samples/s per replica (+1.3% load vs the round-3 measurement):
+
+* per-replica CPU 0.127/0.156 → *0.119/0.146 cores (−6.3%/−6.4%)*;
+* zero remote-write retries, failed batches or dropped series;
+* RSS 277/243 MiB self-reported, pod0 still settling (334 → 290 MiB
+  during the window) — early-rollout RSS is not comparable across
+  rounds; re-check at plateau.
+
+The production gain is about half the harness A/B (−12.5%). Consistent
+with the harness modeling only the scrape→encode→push pipeline: the
+production replicas additionally pay for TLS, kube-API watches and
+larger/gzipped bodies, which round 4 did not touch, diluting the
+percentage. Absolute savings ≈ 0.008–0.010 cores per replica at +1.3%
+load.
+
 == Verification
 
 * Per candidate: tests + clippy green, then a 120 s perf capture on the
