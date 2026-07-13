@@ -449,23 +449,35 @@ impl SeriesTracker {
             .collect();
         let markers = self.rederive_markers(target, &vanished, start_ms);
 
-        self.hashes = current;
-        self.retained = retained_body.and_then(|body| {
-            match self.encoder.compress_vec(&body) {
-                Ok(compressed) => Some(RetainedScrape {
-                    compressed,
-                    start_ms,
-                }),
-                Err(err) => {
-                    warn!(
-                        url = target.url,
-                        %err,
-                        "compressing retained scrape body failed; staleness markers unavailable until the next scrape"
-                    );
-                    None
+        // The retained body exists only to re-derive label sets of vanished
+        // series. While the series set is unchanged — the steady state — the
+        // body already retained answers every re-derivation the new one
+        // could (label sets per identity are deterministic; values and
+        // timestamps are irrelevant to markers), so skip the per-scrape
+        // recompression. `RetainedScrape.start_ms` stays the retained
+        // body's own scrape time: the re-parse filter depends on it.
+        match retained_body {
+            None => self.retained = None,
+            Some(body) => {
+                if self.retained.is_none() || self.hashes != current {
+                    self.retained = match self.encoder.compress_vec(&body) {
+                        Ok(compressed) => Some(RetainedScrape {
+                            compressed,
+                            start_ms,
+                        }),
+                        Err(err) => {
+                            warn!(
+                                url = target.url,
+                                %err,
+                                "compressing retained scrape body failed; staleness markers unavailable until the next scrape"
+                            );
+                            None
+                        }
+                    };
                 }
             }
-        });
+        }
+        self.hashes = current;
         self.update_gauge();
         markers
     }
@@ -964,6 +976,48 @@ mod tests {
         assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_a");
         assert!(tracker.hashes.is_empty());
         assert!(tracker.retained.is_none());
+    }
+
+    #[test]
+    fn stable_series_set_keeps_the_retained_body() {
+        let target = test_target();
+        let mut tracker = SeriesTracker::default();
+
+        // Three scrapes of the same series set with changing values: the
+        // body retained after scrape 1 must survive untouched (no
+        // recompression), because it can re-derive the same identities.
+        for (timestamp, body) in [
+            (1_000, "metric_a 1\nmetric_b 2\n"),
+            (2_000, "metric_a 5\nmetric_b 6\n"),
+            (3_000, "metric_a 9\nmetric_b 10\n"),
+        ] {
+            let batch = simulate_scrape(&target, body, timestamp);
+            assert!(
+                tracker
+                    .advance(&target, &batch, Some(retained(body)), timestamp)
+                    .is_empty()
+            );
+        }
+        let retained_scrape = tracker.retained.as_ref().expect("body retained");
+        assert_eq!(
+            retained_scrape.start_ms, 1_000,
+            "unchanged series set must not replace the retained body"
+        );
+
+        // metric_b vanishes: the marker is re-derived from the scrape-1
+        // body, with the full final label set.
+        let body4 = "metric_a 12\n";
+        let batch4 = simulate_scrape(&target, body4, 4_000);
+        let markers = tracker.advance(&target, &batch4, Some(retained(body4)), 4_000);
+        assert_eq!(markers.len(), 1);
+        assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_b");
+        assert_eq!(get_label(&markers[0].labels, "job"), "test");
+        assert_eq!(markers[0].sample.timestamp, 4_000);
+        // The set changed, so the scrape-4 body replaced the retained one.
+        assert_eq!(
+            tracker.retained.as_ref().expect("body retained").start_ms,
+            4_000
+        );
     }
 
     #[test]
