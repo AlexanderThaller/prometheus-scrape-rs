@@ -246,7 +246,7 @@ impl Metrics {
                 TimeSeries {
                     labels,
                     sample: Sample { value, timestamp },
-                    labels_hash: 0,
+                    identity_hash: 0,
                 }
             })
             .collect();

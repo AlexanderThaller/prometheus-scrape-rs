@@ -595,7 +595,7 @@ mod tests {
                         value: 1027.0,
                         timestamp: 1_395_066_363_000,
                     },
-                    labels_hash: 0,
+                    identity_hash: 0,
                 },
                 TimeSeries {
                     labels: vec![
@@ -606,7 +606,7 @@ mod tests {
                         value: crate::model::stale_nan(),
                         timestamp: -1,
                     },
-                    labels_hash: 0,
+                    identity_hash: 0,
                 },
             ],
         ];
@@ -646,7 +646,7 @@ mod tests {
                 value: 1.0,
                 timestamp,
             },
-            labels_hash: 0,
+            identity_hash: 0,
         }
     }
 
@@ -678,7 +678,7 @@ mod tests {
                     value: 1.0,
                     timestamp: 10,
                 },
-                labels_hash: 0,
+                identity_hash: 0,
             },
             TimeSeries {
                 labels: vec![Label::new("__name__", "up"), Label::new("job", "other")],
@@ -686,7 +686,7 @@ mod tests {
                     value: 0.0,
                     timestamp: 10,
                 },
-                labels_hash: 0,
+                identity_hash: 0,
             },
         ];
         let request = encode_v2(batch);

@@ -122,10 +122,14 @@ pub struct TimeSeries {
     /// Must be sorted by label name and contain no duplicates when sent.
     pub labels: Vec<Label>,
     pub sample: Sample,
-    /// Hash of the final label set, filled by the scrape pipeline right
-    /// after labels are finalized (while they are cache-hot) and consumed
-    /// by the staleness tracker. Zero until finalized; never on the wire.
-    pub labels_hash: u64,
+    /// Staleness identity: `FxHash` of the series' raw exposition bytes
+    /// (metric name through the closing label brace), computed by the
+    /// parser while the line is cache-hot and consumed by the staleness
+    /// tracker. Deterministic across re-parses of the same body; keyed on
+    /// the textual form like Prometheus' scrape cache, so a formatting
+    /// change is a new identity. Zero for synthetic series (report series,
+    /// staleness markers — never tracked); never on the wire.
+    pub identity_hash: u64,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -353,7 +357,7 @@ pub(crate) mod tests {
                         value: 1027.0,
                         timestamp: 1_395_066_363_000,
                     },
-                    labels_hash: 0,
+                    identity_hash: 0,
                 },
                 TimeSeries {
                     labels: Vec::new(),
@@ -361,7 +365,7 @@ pub(crate) mod tests {
                         value: 0.0,
                         timestamp: 0,
                     },
-                    labels_hash: 0,
+                    identity_hash: 0,
                 },
                 TimeSeries {
                     labels: vec![Label::new("edge", "cases")],
@@ -369,7 +373,7 @@ pub(crate) mod tests {
                         value: -0.0,
                         timestamp: -1,
                     },
-                    labels_hash: 0,
+                    identity_hash: 0,
                 },
                 TimeSeries {
                     labels: vec![Label::new("edge", "stale")],
@@ -377,7 +381,7 @@ pub(crate) mod tests {
                         value: stale_nan(),
                         timestamp: i64::MAX,
                     },
-                    labels_hash: 0,
+                    identity_hash: 0,
                 },
                 TimeSeries {
                     labels: vec![Label::new("edge", "min")],
@@ -385,7 +389,7 @@ pub(crate) mod tests {
                         value: f64::MIN_POSITIVE,
                         timestamp: i64::MIN,
                     },
-                    labels_hash: 0,
+                    identity_hash: 0,
                 },
             ],
         };
