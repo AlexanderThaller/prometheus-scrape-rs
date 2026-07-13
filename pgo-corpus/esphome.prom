@@ -1,0 +1,28 @@
+#TYPE esphome_sensor_value gauge
+#TYPE esphome_sensor_failed gauge
+esphome_sensor_failed{id="oglpyl_qqyy_orellc_ahg",node="plr359",name="Iohich VuHz Hazlkc nYo"} 0
+esphome_sensor_value{id="oglpyl_qqyy_orellc_ahg",node="plr359",name="Iohich VuHz Hazlkc nYo",unit="dBm"} -37
+esphome_sensor_failed{id="bculgc_eglo_qbprru",node="plr359",name="Bgtypu CwCh Oeyria"} 0
+esphome_sensor_value{id="bculgc_eglo_qbprru",node="plr359",name="Bgtypu CwCh Oeyria",unit="%"} 100
+esphome_sensor_failed{id="qfhtti_yhkjmt",node="plr359",name="Wgnlmp Vqwfle"} 0
+esphome_sensor_value{id="qfhtti_yhkjmt",node="plr359",name="Wgnlmp Vqwfle",unit="s"} 484
+esphome_sensor_failed{id="jmb726_kgymnbvriay",node="plr359",name="ZLK365 Czhgsrfntmk"} 0
+esphome_sensor_value{id="jmb726_kgymnbvriay",node="plr359",name="ZLK365 Czhgsrfntmk",unit="°C"} 25.7
+esphome_sensor_failed{id="hqk849_xajedpfu",node="plr359",name="CQE625 Nivpkifv"} 0
+esphome_sensor_value{id="hqk849_xajedpfu",node="plr359",name="CQE625 Nivpkifv",unit="hPa"} 1016.0
+esphome_sensor_failed{id="rjf083_bailxodl_wvtpsjcu",node="plr359",name="MGI345 Wnwtsydd Fzvdgyha"} 0
+esphome_sensor_value{id="rjf083_bailxodl_wvtpsjcu",node="plr359",name="MGI345 Wnwtsydd Fzvdgyha",unit="%"} 48.9
+esphome_sensor_failed{id="sgmhrsor",node="plr359",name="Uhdcdpft"} 0
+esphome_sensor_value{id="sgmhrsor",node="plr359",name="Uhdcdpft",unit="m"} -23.7
+esphome_sensor_failed{id="drjnhjqs_hbsrjgim",node="plr359",name="Rwakdadx Mrilnkrk"} 0
+esphome_sensor_value{id="drjnhjqs_hbsrjgim",node="plr359",name="Rwakdadx Mrilnkrk",unit="g/m³"} 11.73
+esphome_sensor_failed{id="ukj_veagx",node="plr359",name="Woo Unmoj"} 0
+esphome_sensor_value{id="ukj_veagx",node="plr359",name="Woo Unmoj",unit="°C"} 14.2
+#TYPE esphome_light_state gauge
+#TYPE esphome_light_color gauge
+#TYPE esphome_light_effect_active gauge
+esphome_light_state{id="xfmhig_anj",node="plr359",name="Kulahd AKV"} 0
+#TYPE esphome_text_sensor_value gauge
+#TYPE esphome_text_sensor_failed gauge
+esphome_text_sensor_failed{id="thhnnhe_gpjawrn",node="plr359",name="UBUUsui Qsfzddh"} 0
+esphome_text_sensor_value{id="thhnnhe_gpjawrn",node="plr359",name="UBUUsui Qsfzddh",value="5940.2.6 (jppeun xvcc 9o3d8s85e1)"} 1.0

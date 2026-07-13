@@ -1,0 +1,282 @@
+# HELP certmanager_certificate_expiration_timestamp_seconds The timestamp after which the certificate expires, expressed in Unix Epoch Time.
+# TYPE certmanager_certificate_expiration_timestamp_seconds gauge
+certmanager_certificate_expiration_timestamp_seconds{issuer_group="",issuer_kind="",issuer_name="jsdf-uywfuof-xxtfldh-qkocoza-da",name="ffrd-eroybux-vikgfof-knnhrgb-aafqryc-lfo",namespace="qtmh-rmcsmxz"} 1.809448572e+09
+certmanager_certificate_expiration_timestamp_seconds{issuer_group="",issuer_kind="",issuer_name="mfqu-jajakoi-aolyqli-kwbsbtv-deobttdm",name="jsdf-uywfuof-xxtfldh-qkocoza-da",namespace="qtmh-rmcsmxz"} 1.935592572e+09
+certmanager_certificate_expiration_timestamp_seconds{issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="ovue-sijd",namespace="gabs-hxorcx"} 1.790951741e+09
+certmanager_certificate_expiration_timestamp_seconds{issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="kyoy-djsfprm",namespace="gabs-hxorcx"} 1.790866114e+09
+# HELP certmanager_certificate_not_after_timestamp_seconds The timestamp after which the certificate is invalid, expressed as a Unix Epoch Time.
+# TYPE certmanager_certificate_not_after_timestamp_seconds gauge
+certmanager_certificate_not_after_timestamp_seconds{issuer_group="",issuer_kind="",issuer_name="jsdf-uywfuof-xxtfldh-qkocoza-da",name="ffrd-eroybux-vikgfof-knnhrgb-aafqryc-lfo",namespace="qtmh-rmcsmxz"} 1.809448572e+09
+certmanager_certificate_not_after_timestamp_seconds{issuer_group="",issuer_kind="",issuer_name="mfqu-jajakoi-aolyqli-kwbsbtv-deobttdm",name="jsdf-uywfuof-xxtfldh-qkocoza-da",namespace="qtmh-rmcsmxz"} 1.935592572e+09
+certmanager_certificate_not_after_timestamp_seconds{issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="ovue-sijd",namespace="gabs-hxorcx"} 1.790951741e+09
+certmanager_certificate_not_after_timestamp_seconds{issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="kyoy-djsfprm",namespace="gabs-hxorcx"} 1.790866114e+09
+# HELP certmanager_certificate_not_before_timestamp_seconds The timestamp before which the certificate is invalid, expressed as a Unix Epoch Time.
+# TYPE certmanager_certificate_not_before_timestamp_seconds gauge
+certmanager_certificate_not_before_timestamp_seconds{issuer_group="",issuer_kind="",issuer_name="jsdf-uywfuof-xxtfldh-qkocoza-da",name="ffrd-eroybux-vikgfof-knnhrgb-aafqryc-lfo",namespace="qtmh-rmcsmxz"} 1.777912572e+09
+certmanager_certificate_not_before_timestamp_seconds{issuer_group="",issuer_kind="",issuer_name="mfqu-jajakoi-aolyqli-kwbsbtv-deobttdm",name="jsdf-uywfuof-xxtfldh-qkocoza-da",namespace="qtmh-rmcsmxz"} 1.777912572e+09
+certmanager_certificate_not_before_timestamp_seconds{issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="ovue-sijd",namespace="gabs-hxorcx"} 1.783175742e+09
+certmanager_certificate_not_before_timestamp_seconds{issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="kyoy-djsfprm",namespace="gabs-hxorcx"} 1.783090115e+09
+# HELP certmanager_certificate_ready_status The ready status of the certificate.
+# TYPE certmanager_certificate_ready_status gauge
+certmanager_certificate_ready_status{condition="False",issuer_group="",issuer_kind="",issuer_name="jsdf-uywfuof-xxtfldh-qkocoza-da",name="ffrd-eroybux-vikgfof-knnhrgb-aafqryc-lfo",namespace="qtmh-rmcsmxz"} 0
+certmanager_certificate_ready_status{condition="False",issuer_group="",issuer_kind="",issuer_name="mfqu-jajakoi-aolyqli-kwbsbtv-deobttdm",name="jsdf-uywfuof-xxtfldh-qkocoza-da",namespace="qtmh-rmcsmxz"} 0
+certmanager_certificate_ready_status{condition="False",issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="ovue-sijd",namespace="gabs-hxorcx"} 0
+certmanager_certificate_ready_status{condition="False",issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="kyoy-djsfprm",namespace="gabs-hxorcx"} 0
+certmanager_certificate_ready_status{condition="True",issuer_group="",issuer_kind="",issuer_name="jsdf-uywfuof-xxtfldh-qkocoza-da",name="ffrd-eroybux-vikgfof-knnhrgb-aafqryc-lfo",namespace="qtmh-rmcsmxz"} 1
+certmanager_certificate_ready_status{condition="True",issuer_group="",issuer_kind="",issuer_name="mfqu-jajakoi-aolyqli-kwbsbtv-deobttdm",name="jsdf-uywfuof-xxtfldh-qkocoza-da",namespace="qtmh-rmcsmxz"} 1
+certmanager_certificate_ready_status{condition="True",issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="ovue-sijd",namespace="gabs-hxorcx"} 1
+certmanager_certificate_ready_status{condition="True",issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="kyoy-djsfprm",namespace="gabs-hxorcx"} 1
+certmanager_certificate_ready_status{condition="Unknown",issuer_group="",issuer_kind="",issuer_name="jsdf-uywfuof-xxtfldh-qkocoza-da",name="ffrd-eroybux-vikgfof-knnhrgb-aafqryc-lfo",namespace="qtmh-rmcsmxz"} 0
+certmanager_certificate_ready_status{condition="Unknown",issuer_group="",issuer_kind="",issuer_name="mfqu-jajakoi-aolyqli-kwbsbtv-deobttdm",name="jsdf-uywfuof-xxtfldh-qkocoza-da",namespace="qtmh-rmcsmxz"} 0
+certmanager_certificate_ready_status{condition="Unknown",issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="ovue-sijd",namespace="gabs-hxorcx"} 0
+certmanager_certificate_ready_status{condition="Unknown",issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="kyoy-djsfprm",namespace="gabs-hxorcx"} 0
+# HELP certmanager_certificate_renewal_timestamp_seconds The timestamp after which the certificate should be renewed, expressed in Unix Epoch Time.
+# TYPE certmanager_certificate_renewal_timestamp_seconds gauge
+certmanager_certificate_renewal_timestamp_seconds{issuer_group="",issuer_kind="",issuer_name="jsdf-uywfuof-xxtfldh-qkocoza-da",name="ffrd-eroybux-vikgfof-knnhrgb-aafqryc-lfo",namespace="qtmh-rmcsmxz"} 1.798936572e+09
+certmanager_certificate_renewal_timestamp_seconds{issuer_group="",issuer_kind="",issuer_name="mfqu-jajakoi-aolyqli-kwbsbtv-deobttdm",name="jsdf-uywfuof-xxtfldh-qkocoza-da",namespace="qtmh-rmcsmxz"} 1.883032572e+09
+certmanager_certificate_renewal_timestamp_seconds{issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="ovue-sijd",namespace="gabs-hxorcx"} 1.788359741e+09
+certmanager_certificate_renewal_timestamp_seconds{issuer_group="",issuer_kind="OefxfhuVnzzpg",issuer_name="oelmnsxpjrz",name="kyoy-djsfprm",namespace="gabs-hxorcx"} 1.788274114e+09
+# HELP certmanager_clock_time_seconds DEPRECATED: use clock_time_seconds_gauge instead. The clock time given in seconds (from 1970/01/01 UTC).
+# TYPE certmanager_clock_time_seconds counter
+certmanager_clock_time_seconds 1.783733306e+09
+# HELP certmanager_clock_time_seconds_gauge The clock time given in seconds (from 1970/01/01 UTC). Gauge form of the deprecated clock_time_seconds counter. No labels.
+# TYPE certmanager_clock_time_seconds_gauge gauge
+certmanager_clock_time_seconds_gauge 1.783733306e+09
+# HELP certmanager_controller_sync_call_count The number of sync() calls made by a controller. Label: controller (fixed small set of controller names).
+# TYPE certmanager_controller_sync_call_count counter
+certmanager_controller_sync_call_count{controller="certificaterequests-approver"} 18
+certmanager_controller_sync_call_count{controller="certificaterequests-issuer-acme"} 30
+certmanager_controller_sync_call_count{controller="certificaterequests-issuer-ca"} 18
+certmanager_controller_sync_call_count{controller="certificaterequests-issuer-selfsigned"} 18
+certmanager_controller_sync_call_count{controller="certificaterequests-issuer-vault"} 18
+certmanager_controller_sync_call_count{controller="certificaterequests-issuer-venafi"} 18
+certmanager_controller_sync_call_count{controller="certificates-issuing"} 33
+certmanager_controller_sync_call_count{controller="certificates-key-manager"} 19
+certmanager_controller_sync_call_count{controller="certificates-metrics"} 15
+certmanager_controller_sync_call_count{controller="certificates-readiness"} 34
+certmanager_controller_sync_call_count{controller="certificates-request-manager"} 34
+certmanager_controller_sync_call_count{controller="certificates-revision-manager"} 30
+certmanager_controller_sync_call_count{controller="certificates-trigger"} 34
+certmanager_controller_sync_call_count{controller="challenges"} 36
+certmanager_controller_sync_call_count{controller="clusterissuers"} 1
+certmanager_controller_sync_call_count{controller="gateway-shim"} 584
+certmanager_controller_sync_call_count{controller="ingress-shim"} 1
+certmanager_controller_sync_call_count{controller="issuers"} 2
+certmanager_controller_sync_call_count{controller="orders"} 42
+# HELP certmanager_controller_sync_error_count The number of errors encountered during controller sync(). Label: controller. Use with controller_sync_call_count to derive error rates.
+# TYPE certmanager_controller_sync_error_count counter
+certmanager_controller_sync_error_count{controller="orders"} 2
+# HELP certmanager_http_acme_client_request_count Total number of outbound ACME HTTP requests. Labels: scheme (http/https), host (ACME host), action (logical ACME operation), method (HTTP verb), status (HTTP status code).
+# TYPE certmanager_http_acme_client_request_count counter
+certmanager_http_acme_client_request_count{action="accept_challenge",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 5
+certmanager_http_acme_client_request_count{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_count{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200"} 2
+certmanager_http_acme_client_request_count{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_count{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="201"} 2
+certmanager_http_acme_client_request_count{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="400"} 1
+certmanager_http_acme_client_request_count{action="create_order_cert",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 4
+certmanager_http_acme_client_request_count{action="get_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 8
+certmanager_http_acme_client_request_count{action="get_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 4
+certmanager_http_acme_client_request_count{action="get_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_count{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_count{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_count{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_count{action="update_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_count{action="wait_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 13
+# HELP certmanager_http_acme_client_request_duration_seconds Latency of outbound ACME HTTP requests in seconds. Summary quantiles approximate request distribution. Labels: scheme (http/https), host (ACME host), action (logical ACME operation), method (HTTP verb), status (HTTP status code). Use with acme_client_request_count for rate/error analysis.
+# TYPE certmanager_http_acme_client_request_duration_seconds summary
+certmanager_http_acme_client_request_duration_seconds{action="accept_challenge",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="accept_challenge",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="accept_challenge",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="accept_challenge",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1.76608222
+certmanager_http_acme_client_request_duration_seconds_count{action="accept_challenge",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 5
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200"} 0.448415553
+certmanager_http_acme_client_request_duration_seconds_count{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200"} 0.291936328
+certmanager_http_acme_client_request_duration_seconds_count{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200"} 2
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 0.157771625
+certmanager_http_acme_client_request_duration_seconds_count{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="201",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="201",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="201",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="201"} 0.321765126
+certmanager_http_acme_client_request_duration_seconds_count{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="201"} 2
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="400",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="400",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="400",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="400"} 0.53996703
+certmanager_http_acme_client_request_duration_seconds_count{action="authorize_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="400"} 1
+certmanager_http_acme_client_request_duration_seconds{action="create_order_cert",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="create_order_cert",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="create_order_cert",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="create_order_cert",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 2.217384469
+certmanager_http_acme_client_request_duration_seconds_count{action="create_order_cert",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 4
+certmanager_http_acme_client_request_duration_seconds{action="get_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="get_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="get_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="get_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1.28940654
+certmanager_http_acme_client_request_duration_seconds_count{action="get_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 8
+certmanager_http_acme_client_request_duration_seconds{action="get_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="get_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="get_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="get_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 0.596298954
+certmanager_http_acme_client_request_duration_seconds_count{action="get_order",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 4
+certmanager_http_acme_client_request_duration_seconds{action="get_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="get_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="get_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="get_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 0.185008552
+certmanager_http_acme_client_request_duration_seconds_count{action="get_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_duration_seconds{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200"} 0.457435
+certmanager_http_acme_client_request_duration_seconds_count{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="GET",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_duration_seconds{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200"} 0.133823498
+certmanager_http_acme_client_request_duration_seconds_count{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="HEAD",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_duration_seconds{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 0.136282936
+certmanager_http_acme_client_request_duration_seconds_count{action="register_account",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_duration_seconds{action="update_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="update_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="update_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="update_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 0.133866757
+certmanager_http_acme_client_request_duration_seconds_count{action="update_registration",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1
+certmanager_http_acme_client_request_duration_seconds{action="wait_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.5"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="wait_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.9"} NaN
+certmanager_http_acme_client_request_duration_seconds{action="wait_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200",quantile="0.99"} NaN
+certmanager_http_acme_client_request_duration_seconds_sum{action="wait_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 1.9969531850000002
+certmanager_http_acme_client_request_duration_seconds_count{action="wait_authorization",host="kjgu-h49.eir.zzzfblhsjly.xxv",method="POST",scheme="https",status="200"} 13
+# HELP go_gc_duration_seconds A summary of the wall-time pause (stop-the-world) duration in garbage collection cycles.
+# TYPE go_gc_duration_seconds summary
+go_gc_duration_seconds{quantile="0"} 3.0534e-05
+go_gc_duration_seconds{quantile="0.25"} 5.0272e-05
+go_gc_duration_seconds{quantile="0.5"} 6.0111e-05
+go_gc_duration_seconds{quantile="0.75"} 0.000114368
+go_gc_duration_seconds{quantile="1"} 0.000415485
+go_gc_duration_seconds_sum 2.81523564
+go_gc_duration_seconds_count 26242
+# HELP go_gc_gogc_percent Heap size target percentage configured by the user, otherwise 100. This value is set by the GOGC environment variable, and the runtime/debug.SetGCPercent function. Sourced from /gc/gogc:percent.
+# TYPE go_gc_gogc_percent gauge
+go_gc_gogc_percent 100
+# HELP go_gc_gomemlimit_bytes Go runtime memory limit configured by the user, otherwise math.MaxInt64. This value is set by the GOMEMLIMIT environment variable, and the runtime/debug.SetMemoryLimit function. Sourced from /gc/gomemlimit:bytes.
+# TYPE go_gc_gomemlimit_bytes gauge
+go_gc_gomemlimit_bytes 9.223372036854776e+18
+# HELP go_goroutines Number of goroutines that currently exist.
+# TYPE go_goroutines gauge
+go_goroutines 441
+# HELP go_info Information about the Go environment.
+# TYPE go_info gauge
+go_info{version="zu0.25.5"} 1
+# HELP go_memstats_alloc_bytes Number of bytes allocated in heap and currently in use. Equals to /memory/classes/heap/objects:bytes.
+# TYPE go_memstats_alloc_bytes gauge
+go_memstats_alloc_bytes 2.408224e+07
+# HELP go_memstats_alloc_bytes_total Total number of bytes allocated in heap until now, even if released already. Equals to /gc/heap/allocs:bytes.
+# TYPE go_memstats_alloc_bytes_total counter
+go_memstats_alloc_bytes_total 6.3924066448e+10
+# HELP go_memstats_buck_hash_sys_bytes Number of bytes used by the profiling bucket hash table. Equals to /memory/classes/profiling/buckets:bytes.
+# TYPE go_memstats_buck_hash_sys_bytes gauge
+go_memstats_buck_hash_sys_bytes 2.098386e+06
+# HELP go_memstats_frees_total Total number of heap objects frees. Equals to /gc/heap/frees:objects + /gc/heap/tiny/allocs:objects.
+# TYPE go_memstats_frees_total counter
+go_memstats_frees_total 2.97075234e+08
+# HELP go_memstats_gc_sys_bytes Number of bytes used for garbage collection system metadata. Equals to /memory/classes/metadata/other:bytes.
+# TYPE go_memstats_gc_sys_bytes gauge
+go_memstats_gc_sys_bytes 4.161808e+06
+# HELP go_memstats_heap_alloc_bytes Number of heap bytes allocated and currently in use, same as go_memstats_alloc_bytes. Equals to /memory/classes/heap/objects:bytes.
+# TYPE go_memstats_heap_alloc_bytes gauge
+go_memstats_heap_alloc_bytes 2.408224e+07
+# HELP go_memstats_heap_idle_bytes Number of heap bytes waiting to be used. Equals to /memory/classes/heap/released:bytes + /memory/classes/heap/free:bytes.
+# TYPE go_memstats_heap_idle_bytes gauge
+go_memstats_heap_idle_bytes 1.1526144e+07
+# HELP go_memstats_heap_inuse_bytes Number of heap bytes that are in use. Equals to /memory/classes/heap/objects:bytes + /memory/classes/heap/unused:bytes
+# TYPE go_memstats_heap_inuse_bytes gauge
+go_memstats_heap_inuse_bytes 3.1039488e+07
+# HELP go_memstats_heap_objects Number of currently allocated objects. Equals to /gc/heap/objects:objects.
+# TYPE go_memstats_heap_objects gauge
+go_memstats_heap_objects 75052
+# HELP go_memstats_heap_released_bytes Number of heap bytes released to OS. Equals to /memory/classes/heap/released:bytes.
+# TYPE go_memstats_heap_released_bytes gauge
+go_memstats_heap_released_bytes 1.1370496e+07
+# HELP go_memstats_heap_sys_bytes Number of heap bytes obtained from system. Equals to /memory/classes/heap/objects:bytes + /memory/classes/heap/unused:bytes + /memory/classes/heap/released:bytes + /memory/classes/heap/free:bytes.
+# TYPE go_memstats_heap_sys_bytes gauge
+go_memstats_heap_sys_bytes 4.2565632e+07
+# HELP go_memstats_last_gc_time_seconds Number of seconds since 1970 of last garbage collection.
+# TYPE go_memstats_last_gc_time_seconds gauge
+go_memstats_last_gc_time_seconds 1.7837331903343318e+09
+# HELP go_memstats_mallocs_total Total number of heap objects allocated, both live and gc-ed. Semantically a counter version for go_memstats_heap_objects gauge. Equals to /gc/heap/allocs:objects + /gc/heap/tiny/allocs:objects.
+# TYPE go_memstats_mallocs_total counter
+go_memstats_mallocs_total 2.97150286e+08
+# HELP go_memstats_mcache_inuse_bytes Number of bytes in use by mcache structures. Equals to /memory/classes/metadata/mcache/inuse:bytes.
+# TYPE go_memstats_mcache_inuse_bytes gauge
+go_memstats_mcache_inuse_bytes 24160
+# HELP go_memstats_mcache_sys_bytes Number of bytes used for mcache structures obtained from system. Equals to /memory/classes/metadata/mcache/inuse:bytes + /memory/classes/metadata/mcache/free:bytes.
+# TYPE go_memstats_mcache_sys_bytes gauge
+go_memstats_mcache_sys_bytes 31408
+# HELP go_memstats_mspan_inuse_bytes Number of bytes in use by mspan structures. Equals to /memory/classes/metadata/mspan/inuse:bytes.
+# TYPE go_memstats_mspan_inuse_bytes gauge
+go_memstats_mspan_inuse_bytes 443040
+# HELP go_memstats_mspan_sys_bytes Number of bytes used for mspan structures obtained from system. Equals to /memory/classes/metadata/mspan/inuse:bytes + /memory/classes/metadata/mspan/free:bytes.
+# TYPE go_memstats_mspan_sys_bytes gauge
+go_memstats_mspan_sys_bytes 538560
+# HELP go_memstats_next_gc_bytes Number of heap bytes when next garbage collection will take place. Equals to /gc/heap/goal:bytes.
+# TYPE go_memstats_next_gc_bytes gauge
+go_memstats_next_gc_bytes 3.9800498e+07
+# HELP go_memstats_other_sys_bytes Number of bytes used for other system allocations. Equals to /memory/classes/other:bytes.
+# TYPE go_memstats_other_sys_bytes gauge
+go_memstats_other_sys_bytes 4.530358e+06
+# HELP go_memstats_stack_inuse_bytes Number of bytes obtained from system for stack allocator in non-CGO environments. Equals to /memory/classes/heap/stacks:bytes.
+# TYPE go_memstats_stack_inuse_bytes gauge
+go_memstats_stack_inuse_bytes 3.571712e+06
+# HELP go_memstats_stack_sys_bytes Number of bytes obtained from system for stack allocator. Equals to /memory/classes/heap/stacks:bytes + /memory/classes/os-stacks:bytes.
+# TYPE go_memstats_stack_sys_bytes gauge
+go_memstats_stack_sys_bytes 3.571712e+06
+# HELP go_memstats_sys_bytes Number of bytes obtained from system. Equals to /memory/classes/total:byte.
+# TYPE go_memstats_sys_bytes gauge
+go_memstats_sys_bytes 5.7497864e+07
+# HELP go_sched_gomaxprocs_threads The current runtime.GOMAXPROCS setting, or the number of operating system threads that can execute user-level Go code simultaneously. Sourced from /sched/gomaxprocs:threads.
+# TYPE go_sched_gomaxprocs_threads gauge
+go_sched_gomaxprocs_threads 20
+# HELP go_threads Number of OS threads created.
+# TYPE go_threads gauge
+go_threads 24
+# HELP process_cpu_seconds_total Total user and system CPU time spent in seconds.
+# TYPE process_cpu_seconds_total counter
+process_cpu_seconds_total 3028.09
+# HELP process_max_fds Maximum number of open file descriptors.
+# TYPE process_max_fds gauge
+process_max_fds 1.048576e+06
+# HELP process_network_receive_bytes_total Number of bytes received by the process over the network.
+# TYPE process_network_receive_bytes_total counter
+process_network_receive_bytes_total 6.60751658e+08
+# HELP process_network_transmit_bytes_total Number of bytes sent by the process over the network.
+# TYPE process_network_transmit_bytes_total counter
+process_network_transmit_bytes_total 6.85175634e+08
+# HELP process_open_fds Number of open file descriptors.
+# TYPE process_open_fds gauge
+process_open_fds 10
+# HELP process_resident_memory_bytes Resident memory size in bytes.
+# TYPE process_resident_memory_bytes gauge
+process_resident_memory_bytes 5.13024e+07
+# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.
+# TYPE process_start_time_seconds gauge
+process_start_time_seconds 1.7805835665e+09
+# HELP process_virtual_memory_bytes Virtual memory size in bytes.
+# TYPE process_virtual_memory_bytes gauge
+process_virtual_memory_bytes 1.34252544e+09
+# HELP process_virtual_memory_max_bytes Maximum amount of virtual memory available in bytes.
+# TYPE process_virtual_memory_max_bytes gauge
+process_virtual_memory_max_bytes 1.8446744073709552e+19
