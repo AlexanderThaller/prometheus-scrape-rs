@@ -218,6 +218,12 @@ both runs 536 batches accepted, zero retries): *8754 → 7038 samples,
 *identical* (4.672 s both) — round 3 never touched the v1/parser path,
 so this doubles as the no-regression guard.
 
+*Production confirmation (2026-07-13, image `:a6d2b68`, 20 min after
+rollout, 322k series / 28.7k samples/s per replica):* per-replica CPU
+0.157/0.193 → *0.127/0.156 cores (−19%)*, matching the harness
+prediction; self-reported RSS ~218–220 MiB (previous build settled
+higher at the same age), consistent with the halved allocation rate.
+
 === 5. Deferred / rejected
 
 * *zstd for retained bodies* — rejected in round 2 (C dependency in the
