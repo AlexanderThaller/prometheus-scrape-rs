@@ -197,20 +197,28 @@ instead (two/four independent lanes folded at the end, ~16–32 B per
 round). The annotation says latency, not throughput, is the limit, so
 expect roughly a 2–3× reduction of the 11.4% rather than elimination.
 
-=== 3. Right-size the parser's label Vec
+=== 3. Right-size the parser's label Vec — status: *rejected after attribution*
 
-Target: the growth realloc half of the 88% allocation site — roughly
-−1 M allocation calls (−30% of total) and the matching share of the ~7%
-mimalloc + libc time. File: `src/parser.rs`.
+The 88% site's original reading ("`with_capacity(12)` plus a growth
+realloc") was wrong. Measured against the corpus (2026-07-13): the
+maximum exposition label count is 9 + name = 10, so with three target
+labels the capacity-12 Vec suffices for ~97% of series — the realloc is
+negligible. The heaptrack entry merges two inlined per-series
+allocations instead:
 
-The parser allocates `Vec::with_capacity(12)` per series; series with 9+
-exposition labels (every histogram bucket in this corpus) realloc when
-`merge_target_labels` reserves target-label room. The parser sees the
-whole line: count `=` inside the braces (memchr over the already-scanned
-label slice, or count while scanning) and size the Vec once as
-`1 + label_count + headroom` where headroom covers target + external
-labels. Alternatively just raise 12 → 16 (768 B vs 576 B transient per
-series) and measure both.
+* 1.0/series — the label `Vec` itself (the floor of the owned-label
+  model);
+* ~0.93/series — the *metric-name* `CompactString` heap spill: 93% of
+  corpus series have names longer than the 24-byte inline buffer, and
+  the name is re-allocated for every series on every scrape. (The
+  separately listed compact_str site, 367 k calls, is the label-*value*
+  spills at 0.21/series plus rare long label names.)
+
+No cheap fix exists inside the current model: `Label` stays 48 bytes
+(pinned), `CompactString` clones of heap strings allocate, and a
+`SmallVec<[Label; 8]>` would trade the alloc for 384 B of extra memcpy
+per series move (alloc ~7% vs libc memcpy ~6% — a wash at best). The
+real lever remains the batch-level arena (deferred, below).
 
 === 4. Encoder pass-1 packed-length accumulation
 
@@ -249,12 +257,60 @@ steady allocation-rate cut.
   regression); no room.
 * *Payload snappy (3.66%)* — protocol-mandated, already raw-format.
 
-== Expected outcome
+== Round-4 result (2026-07-13)
 
-Candidates 1+2 alone target ~17–18% of live CPU with no RSS growth;
-candidate 3 targets ~30% of the allocation rate. Training workload should
-stay flat (candidates touch the tracker, encoder and parser sizing — the
-parse hot loop itself is untouched; candidate 3 changes only capacity).
+Packages landed as separate commits, each measured on the live harness
+(identical 120 s windows @ 4999 Hz, zero retries/failed batches
+throughout):
+
+[cols="5,2,3",options="header"]
+|===
+|Package |Samples |Effect
+
+|Baseline (post round 3)
+|7058
+|—
+
+|1. Retained-body recompression skipped while the series set is
+unchanged (`4ee1968`)
+|6838
+|`advance` → `compress_vec` (6.3% of baseline) left the profile;
+snappy total 10.0% → 4.2% (payload only).
+
+|2. Raw-line staleness identity hashed in the parser (`620cc4f`)
+|6207
+|`hash_labels_into` (12.9% after pkg 1) left the profile; the parser
+absorbed a far smaller hash over one contiguous cache-hot slice.
+Re-derivation also got cheaper (labels finalized only for vanished
+series). Markers stopped computing a hash nothing read.
+
+|3. Label-Vec allocations
+|—
+|*Rejected after attribution* (see candidate 3): the 2 allocs/series
+are the Vec floor plus metric-name CompactString spills, not a realloc;
+no cheap fix inside the owned-label model.
+
+|4. Packed-refs length accumulated in encoder pass 1 (`d15204d`)
+|6131
+|Flush-closure block 794 → 681 absolute samples.
+|===
+
+*Total: 7058 → 6131 samples, −13.1% live agent CPU*, allocation rate
+structurally unchanged (as intended — no RSS trade in either direction).
+
+No-regression guards:
+
+* Training workload: *5.172 s ± 0.082* vs baseline 5.142 s ± 0.088 —
+  statistically identical.
+* Criterion vs `round4-base`: `parser/parse_*` *+11–13%* — expected and
+  accepted: the staleness identity hash moved *into* `parse` (it
+  previously ran per series in `scrape::hash_labels_into`, which no
+  microbench covered; the live pipeline nets −9% from that trade).
+  `remote_write_encode` −2..3%, `relabel` −1.2% (noise).
+* Paired A/B vs `main` (back-to-back 120 s captures, identical load,
+  both runs zero retries/failures): *6713 → 5873 samples, −12.5% total
+  agent CPU* — confirming the incremental per-package story under
+  same-conditions pairing.
 
 == Verification
 
