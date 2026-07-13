@@ -1,0 +1,276 @@
+= Performance improvements, round 4
+:toc:
+:source-highlighter: rouge
+
+Tracking document for the fourth optimization round (2026-07-13, branch
+`perf-improvements-3`). Round 3 (see `perf-improvements-2.adoc`) shipped the
+single-pass RW2.0 encoder, `Bytes` body fetch, precomputed label hashes and
+the single-sample series type; production confirmed −19% CPU per replica.
+Memory savings still outrank CPU savings; nothing in this round may grow
+per-series retained state.
+
+== Harness
+
+Same live harness as round 3, regenerated from its description:
+
+* `python3 -m http.server 18000` serving `pgo-corpus/*.prom`;
+* one job per corpus file × two replica-labeled targets (14 targets,
+  30,586 tracked series), `scrape_interval: 4s`;
+* `remote_write` straight to the NAS Mimir
+  (`http://192.168.1.94:9009/api/v1/push`,
+  `protobuf_message: io.prometheus.write.v2.Request`,
+  `X-Scope-OrgID: anonymous`).
+
+Config regenerated into the session scratchpad (`live-test.yml`). Verified
+clean throughout every capture: zero retries, zero failed batches, zero
+dropped series.
+
+Profiling binary: `--profile profiling` with
+`RUSTFLAGS="-C force-frame-pointers=yes"`.
+
+== Live baseline (RW2.0, 120 s perf @ 4999 Hz)
+
+*7058 samples* at 460 batches accepted — statistically identical to the
+round-3 closing state (~7000–7075 samples at the same load), so the merged
+branch reproduces and this baseline is sound. Agent RSS after ~8 min:
+52.0 MiB.
+
+Flat profile (self cost):
+
+[cols="4,1,5",options="header"]
+|===
+|Symbol |CPU share |Notes
+
+|`scrape::hash_labels_into`
+|*11.4%*
+|The per-series identity hash over finalized labels. perf annotate: 62% of
+it on the two `imul` instructions — the FxHash fold is a *serial multiply
+dependency chain* (~5 cycles per 8 bytes, ~3 folds per label). Round 3
+moved the hash to cache-hot data; arithmetic latency is now the wall, not
+cache misses.
+
+|`parser::parse`
+|10.4%
+|Absolute cost roughly unchanged since round 3 (7% of a larger total).
+
+|`Endpoint::flush` closure
+|10.0%
+|The v2 encoder outside `intern`: memoization compares, ref-stream
+bookkeeping, the write loop (including a second full walk over each
+series' refs just to sum `varint_len` for the packed-field length).
+
+|snappy `compress_vec`
+|*10.0%*
+|Caller attribution: *6.34% retained-body compression in
+`SeriesTracker::advance`* vs 3.66% remote-write payload. Two thirds of the
+snappy bill is insurance that is only ever consumed on vanish events.
+
+|`scrape::finalize_series_labels`
+|6.0%
+|Merge target labels (quadratic linear scans) + external labels + the
+relabel walk.
+
+|`encode_v2_into::intern`
+|5.9%
+|Map probes for the memoization misses (metric names, `le` values cycling
+within histogram families).
+
+|mimalloc (`mi_free` + page alloc/collect)
+|~7.1%
+|Tracks the allocation rate (below).
+
+|`sort_labels` (insertion sort)
+|2.2%
+|~15 labels per series, mostly presorted input.
+
+|`scrape_loop` inlined work
+|2.0% (+0.8% u64 sort)
+|Tracker bookkeeping: per-scrape `Vec<u64>` collect + sort + binary
+searches.
+
+|libc (memcpy/memmove etc.)
+|~6.3%
+|Body copies, label memcpys, channel moves.
+
+|kernel
+|~4%
+|Network + timers.
+|===
+
+== Allocation baseline (heaptrack, system allocator)
+
+heaptrack cannot see the statically linked mimalloc, so the agent was
+rebuilt with the `#[global_allocator]` line disabled (temporary local
+edit, same profile otherwise) — allocation *counts* are
+allocator-independent, timings from that run are not used.
+
+Whole run 200.8 s, 1.53 M samples scraped: *3.50 M allocation calls
+(17.4 k/s) — 2.29 per scraped sample*, matching round 3's closing 2.30.
+Peak heap 19.7 MiB.
+
+[cols="1,2,4",options="header"]
+|===
+|Calls |Site |What it is
+
+|3,086,463 (88%)
+|`scrape_once` → `parse` label `Vec`s
+|*Two allocations per series per scrape*: the parser's
+`Vec::with_capacity(12)` (`parser.rs:206`) plus the growth realloc when
+`merge_target_labels` reserves room for target labels and the series
+already carries ~9+ exposition labels (histogram buckets do).
+
+|366,700 (10%)
+|`compact_str` heap spills
+|Label names/values longer than the 24-byte inline buffer.
+
+|~43,000 (1.2%)
+|Everything else combined
+|Encoder scratch, reqwest/tokio internals, retained-body buffers, …
+|===
+
+== Training-workload baseline (v1/parser path)
+
+hyperfine, 10 runs, profiling binary: *5.142 s ± 0.088 s*. Not comparable
+to round 3's recorded 4.672 s (different binary: frame pointers now on,
+corpus committed since; this number is the round-4 reference for the
+no-regression guard).
+
+Criterion baseline saved as `round4-base`
+(`cargo bench --bench benchmarks -- --save-baseline round4-base`):
+
+* `parser/parse_100_series` 11.55 µs, `_1000` 125.0 µs, `_10000` 1.295 ms
+* `relabel/6_labels_3_rules` 145.7 ns
+* `remote_write_encode/protobuf_snappy_500_series` 45.32 µs,
+  `_2000` 184.7 µs
+
+== Candidates
+
+=== 1. Stop recompressing the retained body when the series set is unchanged
+
+Target: *−6.3% total live CPU* (the `advance` → `compress_vec` block),
+zero RSS change. File: `src/scrape.rs`.
+
+`SeriesTracker::advance` snappy-compresses the full scrape body *every
+scrape*, but the retained body exists only to re-derive label sets of
+*vanished* series. When the current scrape's (sorted) hash set equals the
+tracker's previous one — the overwhelmingly common steady state — the old
+retained body can answer every future re-derivation the new one could:
+label sets per identity are deterministic and value/timestamp changes are
+irrelevant to markers. Keep `RetainedScrape.start_ms` as the *retained
+body's* scrape time (the re-parse filter must keep using it), and replace
+the body only when the hash set changed (or nothing is retained yet).
+
+Caveat to verify: a series with an *explicit* exposition timestamp that
+happens to equal the retained body's `start_ms` — same edge as today,
+covered by existing tests.
+
+=== 2. Series identity from the raw exposition line, hashed during parse
+
+Target: the *11.4%* `hash_labels_into` block (minus a small replacement
+cost in the parser, where the bytes are already in L1). Files:
+`src/parser.rs`, `src/scrape.rs`, `src/model.rs`.
+
+The staleness identity only has to be (a) stable across scrapes and
+(b) re-derivable from the retained body. Both hold for a hash of the raw
+identity bytes of the exposition line (metric name through closing `}`),
+computed *in the parser* over one contiguous, cache-hot slice — instead
+of re-hashing ~15 finalized `CompactString`s per series per scrape
+through a serial-multiply chain. `finalize_series_labels` stops hashing
+entirely; re-derivation matches vanished raw-hashes against the re-parse
+of the retained body (which reproduces identical raw lines by
+construction), then finalizes labels only for the vanished ones.
+
+Semantic shift (same trade Prometheus' scrape cache makes — it keys
+series on the raw metric string too): if an exporter changes the *textual
+form* of a series without changing its labels (label reordering,
+whitespace), the tracker sees one identity vanish and one appear — one
+spurious staleness marker racing one real sample at the same timestamp.
+Bounded, self-healing, and only on a formatting change between two
+scrapes of the same target.
+
+Also fixes silently-dead work found while reading: `stale_series` hashes
+its marker labels, but markers are appended to the batch *after*
+`tracker.advance` ran — nothing ever reads that hash.
+
+Fallback if the semantics are rejected: break the FxHash dependency chain
+instead (two/four independent lanes folded at the end, ~16–32 B per
+round). The annotation says latency, not throughput, is the limit, so
+expect roughly a 2–3× reduction of the 11.4% rather than elimination.
+
+=== 3. Right-size the parser's label Vec
+
+Target: the growth realloc half of the 88% allocation site — roughly
+−1 M allocation calls (−30% of total) and the matching share of the ~7%
+mimalloc + libc time. File: `src/parser.rs`.
+
+The parser allocates `Vec::with_capacity(12)` per series; series with 9+
+exposition labels (every histogram bucket in this corpus) realloc when
+`merge_target_labels` reserves target-label room. The parser sees the
+whole line: count `=` inside the braces (memchr over the already-scanned
+label slice, or count while scanning) and size the Vec once as
+`1 + label_count + headroom` where headroom covers target + external
+labels. Alternatively just raise 12 → 16 (768 B vs 576 B transient per
+series) and measure both.
+
+=== 4. Encoder pass-1 packed-length accumulation
+
+Target: part of the 10.0% flush-closure block. File:
+`src/remote_write.rs`.
+
+The write loop re-walks every series' refs summing `varint_len` to size
+the packed field. Pass 1 already touches every ref as it pushes —
+accumulate per-series packed length there (one `u32` per series in
+`V2Scratch`) and the write loop stops re-deriving it. Expect ~1–2%, may
+also help `intern` cache behavior slightly.
+
+=== 5. Tracker micro-allocations
+
+Reuse a per-tracker `Vec<u64>` for `current` (today: collect + sort +
+drop per scrape per target) and a scratch for `vanished`. Purely
+mechanical, rides along with candidate 1's edit. Sub-1% CPU, small
+steady allocation-rate cut.
+
+=== Deferred / rejected
+
+* *Retain the raw body instead of compressing* — kills the whole 6.3%
+  but costs ~7× retained-body RSS per target; memory priority says no.
+  Candidate 1 gets most of the win for free.
+* *Per-target cache of finalized label sets keyed on raw lines*
+  (Prometheus scrape-cache style, would also kill `finalize` +
+  `sort_labels`) — reintroduces ~500 B/series retained state, the exact
+  thing the vmagent-style tracker was built to avoid (~160 MiB at the
+  production replica's 322k series). Rejected on RSS.
+* *Batch-level label arena* (one allocation per scrape instead of one
+  per series) — would eliminate most of the 88% site, but `TimeSeries`
+  would carry arena ranges through relabeling/sorting/encoding; too
+  invasive for this round, revisit if candidate 3 lands short.
+* *Wider `Label` inline buffer* for the 10% CompactString spills —
+  `Label` must stay 48 bytes (pinned by test since the bytes-labels
+  regression); no room.
+* *Payload snappy (3.66%)* — protocol-mandated, already raw-format.
+
+== Expected outcome
+
+Candidates 1+2 alone target ~17–18% of live CPU with no RSS growth;
+candidate 3 targets ~30% of the allocation rate. Training workload should
+stay flat (candidates touch the tracker, encoder and parser sizing — the
+parse hot loop itself is untouched; candidate 3 changes only capacity).
+
+== Verification
+
+* Per candidate: tests + clippy green, then a 120 s perf capture on the
+  live harness against this document's baseline (watching
+  `remote_write_failed_batches_total == 0` and retries on the NAS Mimir),
+  commit per work package with measured numbers.
+* Candidate 1: staleness tests must stay green; add a test for the
+  stable-set path (marker still derivable two+ scrapes after the body was
+  last replaced) and confirm `advance` → `compress_vec` leaves the
+  profile.
+* Candidate 2: staleness tests updated for raw-line identity; parity of
+  marker label sets before/after via the existing re-derivation tests;
+  confirm `hash_labels_into` leaves the profile.
+* Candidate 3: heaptrack re-run, expect the 88% site to drop to ~1
+  call/series.
+* Final: hyperfine on the training workload vs 5.142 s ± 0.088 s and
+  criterion vs `round4-base` as the no-regression guard; paired A/B
+  vs `main` (back-to-back 120 s captures) before merge.
