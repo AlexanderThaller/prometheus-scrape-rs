@@ -708,10 +708,7 @@ rpc_duration_seconds_count 2693
         // NaN case variants: check they parse to NaN.
         for body in ["m NaN", "m nan", "m NAN"] {
             let s = parse(body, TS, true)?;
-            assert!(
-                s[0].sample.value.is_nan(),
-                "body {body:?} should be NaN"
-            );
+            assert!(s[0].sample.value.is_nan(), "body {body:?} should be NaN");
         }
         Ok(())
     }
