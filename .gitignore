@@ -1,1 +1,5 @@
 /target
+# Raw, unsanitized scrape captures. The committed corpus in pgo-corpus/ is
+# generated from these by `cargo run --example sanitize_corpus`; the originals
+# carry hostnames, tenant names and hardware identifiers and must stay local.
+/corpus-raw

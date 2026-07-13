@@ -1,0 +1,44 @@
+# TYPE tasmota_info gauge
+tasmota_info{version="30.6.1.6",image="(urpfurh)",build_timestamp="6824-60-44J34:15:17",devicename="nrij869.hagwx.ooynzgj.ph",friendlyname="Ztitqpksbt - Ljkmm Llzugaxyg"} 1
+# TYPE tasmota_uptime_seconds gauge
+tasmota_uptime_seconds{} 3140412
+# TYPE tasmota_boot_count counter
+tasmota_boot_count{} 42
+# TYPE tasmota_flash_writes_total counter
+tasmota_flash_writes_total{} 2192
+# TYPE tasmota_wifi_station_info gauge
+tasmota_wifi_station_info{bssid="W6:93:C7:14:9Q:86",ssid="DRRYVH"} 1
+# TYPE tasmota_wifi_station_signal_dbm gauge
+tasmota_wifi_station_signal_dbm{mac_address="W6:93:C7:14:9Q:86"} -57
+# TYPE tasmota_memory_free_bytes gauge
+tasmota_memory_free_bytes{memory="heap"} 21424
+# TYPE tasmota_energy_voltage_volts gauge
+tasmota_energy_voltage_volts{} 236
+# TYPE tasmota_energy_current_amperes gauge
+tasmota_energy_current_amperes{} 0.044
+# TYPE tasmota_energy_power_active_watts gauge
+tasmota_energy_power_active_watts{} 7
+# TYPE tasmota_energy_power_kilowatts_daily counter
+tasmota_energy_power_kilowatts_daily{} 0.011
+# TYPE tasmota_energy_power_kilowatts_total counter
+tasmota_energy_power_kilowatts_total{} 22.932
+# TYPE tasmota_relay1_state gauge
+tasmota_relay1_state{} 1
+# TYPE tasmota_sensors_total gauge
+tasmota_sensors_total{sensor="energy"} 22.932
+# TYPE tasmota_sensors_yesterday gauge
+tasmota_sensors_yesterday{sensor="energy"} 0.018
+# TYPE tasmota_sensors_today gauge
+tasmota_sensors_today{sensor="energy"} 0.011
+# TYPE tasmota_sensors_power gauge
+tasmota_sensors_power{sensor="energy"} 7
+# TYPE tasmota_sensors_apparentpower gauge
+tasmota_sensors_apparentpower{sensor="energy"} 10
+# TYPE tasmota_sensors_reactivepower gauge
+tasmota_sensors_reactivepower{sensor="energy"} 8
+# TYPE tasmota_sensors_factor gauge
+tasmota_sensors_factor{sensor="energy"} 0.63
+# TYPE tasmota_sensors_voltage_volts gauge
+tasmota_sensors_voltage_volts{sensor="energy"} 236
+# TYPE tasmota_sensors_current_amperes gauge
+tasmota_sensors_current_amperes{sensor="energy"} 0.044

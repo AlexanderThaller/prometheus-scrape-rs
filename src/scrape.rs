@@ -885,8 +885,8 @@ mod tests {
     }
 
     /// A scrape body as the tracker receives it from `fetch`.
-    fn retained(body: &str) -> Option<bytes::Bytes> {
-        Some(bytes::Bytes::copy_from_slice(body.as_bytes()))
+    fn retained(body: &str) -> bytes::Bytes {
+        bytes::Bytes::copy_from_slice(body.as_bytes())
     }
 
     /// Reproduce the live pipeline for a raw body: parse + finalize labels.
@@ -917,7 +917,7 @@ mod tests {
         let batch1 = simulate_scrape(&target, body1, ts1);
         assert!(
             tracker
-                .advance(&target, &batch1, retained(body1), ts1)
+                .advance(&target, &batch1, Some(retained(body1)), ts1)
                 .is_empty()
         );
         assert_eq!(tracker.hashes.len(), 2);
@@ -927,7 +927,7 @@ mod tests {
         let body2 = "metric_a{case=\"x\"} 1\nexplicit 3 500\n";
         let ts2 = 2_000;
         let batch2 = simulate_scrape(&target, body2, ts2);
-        let markers = tracker.advance(&target, &batch2, retained(body2), ts2);
+        let markers = tracker.advance(&target, &batch2, Some(retained(body2)), ts2);
         assert_eq!(markers.len(), 1);
         assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_b");
         assert_eq!(get_label(&markers[0].labels, "job"), "test");
@@ -954,7 +954,7 @@ mod tests {
         let batch4 = simulate_scrape(&target, body2, ts4);
         assert!(
             tracker
-                .advance(&target, &batch4, retained(body2), ts4)
+                .advance(&target, &batch4, Some(retained(body2)), ts4)
                 .is_empty()
         );
 
@@ -980,7 +980,7 @@ mod tests {
         let body1 = "kept_a 1\ndropped_b 2\n";
         let batch1 = simulate_scrape(&target, body1, 1_000);
         assert_eq!(batch1.len(), 1);
-        tracker.advance(&target, &batch1, retained(body1), 1_000);
+        tracker.advance(&target, &batch1, Some(retained(body1)), 1_000);
         assert_eq!(tracker.hashes.len(), 1);
 
         // Everything vanishes; only kept_a may produce a marker.

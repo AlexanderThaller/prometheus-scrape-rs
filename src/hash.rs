@@ -3,7 +3,7 @@
 //! An FxHash-style word-at-a-time hasher used where hashes never leave the
 //! process: the remote-write symbol interning map and the staleness
 //! tracker's series identities. The predecessor (byte-at-a-time FNV-1a in
-//! the tracker, SipHash in the interning map) processed one byte per
+//! the tracker, `SipHash` in the interning map) processed one byte per
 //! multiply; this folds eight. Hash-flooding resistance is irrelevant for
 //! data the agent scraped itself, and values may change between binary
 //! versions — nothing persists them.

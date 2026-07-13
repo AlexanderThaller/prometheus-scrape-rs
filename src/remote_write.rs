@@ -230,8 +230,13 @@ impl Endpoint {
             }
         }
         if !pending.is_empty() {
-            self.flush(std::mem::take(&mut pending), &mut proto_buf, &mut scratch, &mut encoder)
-                .await;
+            self.flush(
+                std::mem::take(&mut pending),
+                &mut proto_buf,
+                &mut scratch,
+                &mut encoder,
+            )
+            .await;
         }
         info!(endpoint = self.name, "remote-write sender stopped");
     }
@@ -460,10 +465,10 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
                     value_ref = Some(scratch.refs[prev_base + 1]);
                 }
             }
-            let name_ref = name_ref
-                .unwrap_or_else(|| intern(&mut symbols, &mut index, &label.name));
-            let value_ref = value_ref
-                .unwrap_or_else(|| intern(&mut symbols, &mut index, &label.value));
+            let name_ref =
+                name_ref.unwrap_or_else(|| intern(&mut symbols, &mut index, &label.name));
+            let value_ref =
+                value_ref.unwrap_or_else(|| intern(&mut symbols, &mut index, &label.value));
             scratch.refs.push(name_ref);
             scratch.refs.push(value_ref);
         }
@@ -616,15 +621,16 @@ mod tests {
 
     /// A corpus-scale batch exercises multi-byte varint symbol refs and
     /// length delimiters.
+    ///
+    /// The corpus is committed (pseudonymized from real scrapes), so this must
+    /// run everywhere. It previously skipped when the file was absent, which
+    /// meant it only ever ran on the machine holding the private capture.
     #[test]
     fn encode_v2_into_matches_reference_on_large_batch() {
         let body = std::fs::read_to_string(
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("pgo-corpus/cilium-agent.prom"),
-        );
-        let Ok(body) = body else {
-            // Corpus is a local convenience, not a repo guarantee.
-            return;
-        };
+        )
+        .expect("committed corpus is readable");
         let batch = crate::parser::parse(&body, 1_700_000_000_000, true).expect("corpus parses");
         let mut buf = Vec::new();
         let mut scratch = V2Scratch::default();
