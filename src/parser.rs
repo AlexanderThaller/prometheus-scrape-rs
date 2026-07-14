@@ -198,6 +198,9 @@ fn parse_line(
     }
     // Metric name is ASCII by construction, so this slice is valid UTF-8.
     let metric_name = str_from(body, name_start, i);
+    // End of the series' raw identity bytes (name, extended past the label
+    // set below). Hashed for staleness tracking while the line is cache-hot.
+    let mut identity_end = i;
 
     // Reserve label slots: name + however many appear.
     // Headroom beyond typical exposition label counts: the scrape pipeline
@@ -215,6 +218,7 @@ fn parse_line(
     // --- optional label set ---
     if i < end && bytes[i] == b'{' {
         i = parse_labels(body, i, end, line_no, &mut labels)?;
+        identity_end = i;
         // Optional whitespace before value.
         while i < end && is_space(bytes[i]) {
             i += 1;
@@ -276,10 +280,22 @@ fn parse_line(
         timestamp = default_timestamp_ms;
     }
 
+    // The series' staleness identity: one hash over the contiguous raw
+    // identity bytes (metric name through the closing '}'), computed here
+    // where they sit in L1 — re-hashing the ~15 finalized label strings
+    // per series later was 11% of live CPU. Identical raw lines re-parsed
+    // from the retained body reproduce the identical hash by construction.
+    let identity_hash = {
+        use std::hash::Hasher as _;
+        let mut hasher = crate::hash::FxHasher::default();
+        hasher.write(&bytes[name_start..identity_end]);
+        hasher.finish()
+    };
+
     Ok(Some(TimeSeries {
         labels,
         sample: Sample { value, timestamp },
-        labels_hash: 0,
+        identity_hash,
     }))
 }
 
@@ -900,5 +916,31 @@ rpc_duration_seconds_count 2693
         assert!(parse("m{a=\"b\"", TS, true).is_err());
         assert!(parse("m{a=\"b\",", TS, true).is_err());
         assert!(parse("m{", TS, true).is_err());
+    }
+
+    /// The staleness identity covers the raw name+labels bytes only:
+    /// stable across value/timestamp changes and re-parses, distinct for
+    /// any change to the identity bytes (including pure formatting — the
+    /// same trade Prometheus' scrape cache makes).
+    #[test]
+    fn identity_hash_tracks_the_raw_series_text() {
+        let one = |body: &str| {
+            let series = parse(body, TS, true).expect("parses");
+            assert_eq!(series.len(), 1);
+            series.into_iter().next().expect("one series").identity_hash
+        };
+
+        // Value and timestamp are not part of the identity.
+        assert_eq!(one("m{a=\"b\"} 1"), one("m{a=\"b\"} 2 500"));
+        assert_eq!(one("m 1"), one("m 2"));
+        // Names, label names and label values are.
+        assert_ne!(one("m{a=\"b\"} 1"), one("n{a=\"b\"} 1"));
+        assert_ne!(one("m{a=\"b\"} 1"), one("m{a=\"c\"} 1"));
+        assert_ne!(one("m 1"), one("m{a=\"b\"} 1"));
+        // Textual identity: formatting differences are new identities.
+        assert_ne!(one("m{a=\"b\"} 1"), one("m{ a=\"b\" } 1"));
+        assert_ne!(one("m{a=\"b\",c=\"d\"} 1"), one("m{c=\"d\",a=\"b\"} 1"));
+        // Nonzero for plain series (zero is reserved for synthetics).
+        assert_ne!(one("m 1"), 0);
     }
 }

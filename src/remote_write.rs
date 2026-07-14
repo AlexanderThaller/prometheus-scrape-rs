@@ -407,6 +407,10 @@ struct V2Scratch {
     /// Flat stream of symbol refs for the whole batch, in series order —
     /// replaces the former per-series `labels_refs: Vec<u32>`.
     refs: Vec<u32>,
+    /// Per-series encoded size of the packed `labels_refs` field,
+    /// accumulated while pass 1 touches each ref anyway — the write loop
+    /// would otherwise re-walk every ref just to sum `varint_len`s.
+    packed_lens: Vec<u32>,
 }
 
 /// Single-pass remote-write 2.0 encoder: every distinct label name and
@@ -436,6 +440,7 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
     }
 
     scratch.refs.clear();
+    scratch.packed_lens.clear();
     let mut symbols: Vec<&str> = Vec::with_capacity(1024);
     symbols.push("");
     let mut index = FxMap::with_capacity_and_hasher(1024, std::hash::BuildHasherDefault::default());
@@ -450,6 +455,7 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
     let mut prev: Option<&TimeSeries> = None;
     for series in batch {
         let base = scratch.refs.len();
+        let mut packed = 0usize;
         let prev_matches = prev.is_some_and(|p| p.labels.len() == series.labels.len());
         for (position, label) in series.labels.iter().enumerate() {
             let mut name_ref = None;
@@ -471,7 +477,13 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
                 value_ref.unwrap_or_else(|| intern(&mut symbols, &mut index, &label.value));
             scratch.refs.push(name_ref);
             scratch.refs.push(value_ref);
+            packed += varint_len(u64::from(name_ref)) + varint_len(u64::from(value_ref));
         }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "packed length of one series' refs is far below 4 GiB"
+        )]
+        scratch.packed_lens.push(packed as u32);
         prev = Some(series);
     }
 
@@ -485,10 +497,10 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
 
     // Field 5: repeated TimeSeriesV2.
     let mut offset = 0usize;
-    for series in batch {
+    for (series, &packed) in batch.iter().zip(&scratch.packed_lens) {
+        let packed = packed as usize;
         let refs = &scratch.refs[offset..offset + series.labels.len() * 2];
         offset += refs.len();
-        let packed: usize = refs.iter().map(|&r| varint_len(u64::from(r))).sum();
         let mut series_len = 0usize;
         if !refs.is_empty() {
             series_len += 1 + varint_len(packed as u64) + packed;
@@ -508,7 +520,7 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
         }
         // Field 2: the single sample, as a repeated field of one.
         buf.push(0x12);
-        put_varint(series.sample.wire_len() as u64, buf);
+        put_varint(sample_len as u64, buf);
         series.sample.put_fields(buf);
     }
 }
@@ -595,7 +607,7 @@ mod tests {
                         value: 1027.0,
                         timestamp: 1_395_066_363_000,
                     },
-                    labels_hash: 0,
+                    identity_hash: 0,
                 },
                 TimeSeries {
                     labels: vec![
@@ -606,7 +618,7 @@ mod tests {
                         value: crate::model::stale_nan(),
                         timestamp: -1,
                     },
-                    labels_hash: 0,
+                    identity_hash: 0,
                 },
             ],
         ];
@@ -646,7 +658,7 @@ mod tests {
                 value: 1.0,
                 timestamp,
             },
-            labels_hash: 0,
+            identity_hash: 0,
         }
     }
 
@@ -678,7 +690,7 @@ mod tests {
                     value: 1.0,
                     timestamp: 10,
                 },
-                labels_hash: 0,
+                identity_hash: 0,
             },
             TimeSeries {
                 labels: vec![Label::new("__name__", "up"), Label::new("job", "other")],
@@ -686,7 +698,7 @@ mod tests {
                     value: 0.0,
                     timestamp: 10,
                 },
-                labels_hash: 0,
+                identity_hash: 0,
             },
         ];
         let request = encode_v2(batch);

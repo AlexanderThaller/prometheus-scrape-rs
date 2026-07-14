@@ -18,6 +18,11 @@ RUN apk add --no-cache musl-dev build-base ca-certificates \
 # including memcpy) — the actual root cause of most "musl is slow" reports.
 # All cluster nodes are x86-64-v3 capable (Zen 3 / Alder Lake).
 ENV BASE_RUSTFLAGS="-C target-cpu=x86-64-v3"
+# Profiling variant: BUILD_PROFILE=profiling EXTRA_RUSTFLAGS="-Cforce-frame-pointers=yes"
+# keeps the PGO pipeline and optimization level but adds debug symbols and
+# frame pointers so perf works against the running pod. Deploy stays default.
+ARG BUILD_PROFILE=deploy
+ARG EXTRA_RUSTFLAGS=""
 WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
@@ -42,9 +47,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Phase 2: optimized build using the profile.
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    RUSTFLAGS="$BASE_RUSTFLAGS -Cprofile-use=/pgo/merged.profdata" \
-    cargo build --profile deploy --bin prometheus-scrape-rs \
-    && cp target/deploy/prometheus-scrape-rs /prometheus-scrape-rs
+    RUSTFLAGS="$BASE_RUSTFLAGS $EXTRA_RUSTFLAGS -Cprofile-use=/pgo/merged.profdata" \
+    cargo build --profile "$BUILD_PROFILE" --bin prometheus-scrape-rs \
+    && cp "target/$BUILD_PROFILE/prometheus-scrape-rs" /prometheus-scrape-rs
 
 FROM scratch
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt

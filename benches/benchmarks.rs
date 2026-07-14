@@ -121,7 +121,7 @@ fn write_request(series: usize) -> WriteRequest {
                     value: 42.0,
                     timestamp: 1_700_000_000_000 + i64::try_from(i).unwrap_or(0),
                 },
-                labels_hash: 0,
+                identity_hash: 0,
             })
             .collect(),
     }
