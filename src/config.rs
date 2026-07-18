@@ -1112,4 +1112,11 @@ remote_write:
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("max_samples_per_send"), "{err}");
     }
+
+    #[test]
+    fn example_config_loads() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("example/prometheus.yml");
+        let config = load(&path).expect("example config must load");
+        assert_eq!(config.remote_write.len(), 2, "mimir + gigapipe endpoints");
+    }
 }

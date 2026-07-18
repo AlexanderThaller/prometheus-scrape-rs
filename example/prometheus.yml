@@ -47,3 +47,10 @@ remote_write:
       - source_labels: [__name__]
         regex: "go_gc_.*"
         action: drop
+
+  # Every endpoint receives every batch on its own queue, so a second entry
+  # dual-writes — e.g. gigapipe/qryn storing into ClickHouse during a
+  # migration off Mimir (see docs/clickhouse-migration.adoc).
+  - url: http://gigapipe.example.com:3100/api/v1/prom/remote/write
+    name: clickhouse-gigapipe
+    # RW 1.0 (default protobuf_message); gigapipe's RW 2.0 support is unverified

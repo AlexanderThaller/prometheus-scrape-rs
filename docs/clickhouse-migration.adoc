@@ -1,0 +1,123 @@
+= Replacing Mimir with ClickHouse (via gigapipe)
+:toc:
+:source-highlighter: rouge
+
+Feasibility investigation and migration runbook (2026-07-18) for retiring
+Mimir from the cluster and storing scraped metrics in the already-running
+ClickHouse, to free the resources the Mimir tier consumes.
+
+*Verdict: feasible, with zero scraper code changes.* The scraper keeps
+speaking Prometheus remote-write; the storage swap happens entirely behind
+that protocol by deploying https://github.com/metrico/gigapipe[gigapipe]
+(formerly qryn) as a thin PromQL-compatible ingest/query layer over
+ClickHouse.
+
+== Why this shape
+
+Three options were evaluated:
+
+[cols="2,4,4",options="header"]
+|===
+|Option |Pros |Why (not) chosen
+
+|ClickHouse native remote-write (`TimeSeries` engine, 24.8+)
+|Zero extra services
+|Engine is experimental, one static `config.xml` entry per table, and — the
+killer — no usable PromQL query path: the 25.8 `prometheusQuery` function /
+`promql` dialect supports only `rate`/`delta`/`increase`, no binary
+operators, and no Prometheus HTTP API, so Grafana cannot query it.
+
+|Native ClickHouse sink in the scraper, own MergeTree schema, SQL dashboards
+|Full schema control, no experimental features
+|Real Rust work plus a rewrite of every PromQL dashboard/alert to SQL. Kept
+as fallback (see <<fallback>>).
+
+|gigapipe over ClickHouse (chosen)
+|Keeps PromQL (Grafana Prometheus datasource points at gigapipe), stores in
+the existing ClickHouse, no scraper changes, far lighter than Mimir
+|One extra (small) service; its PromQL is an independent implementation, so
+dashboard-level validation is mandatory before Mimir goes away.
+|===
+
+No scraper changes are needed because:
+
+* `RemoteWriteHandle::send` already fans every batch out to *all* configured
+  `remote_write` endpoints with independent queues — dual-writing to Mimir
+  and gigapipe during the migration is one more config entry. A slow or down
+  gigapipe cannot block the Mimir path (`try_send` drops only that
+  endpoint's copy and bumps `remote_write_dropped_series_total`).
+* Auth, extra headers, TLS and the RW 1.0/2.0 protocol switch are all
+  per-endpoint config. Use the default `prometheus.WriteRequest` (RW 1.0)
+  for gigapipe; its RW 2.0 support is unverified.
+* The internal model (labels + one sample, no exemplars/native histograms)
+  is exactly what gigapipe ingests.
+
+== Migration runbook
+
+=== 1. Deploy gigapipe (infra)
+
+Image `metrico/gigapipe`, pointed at the existing ClickHouse with a
+dedicated database (e.g. `qryn`); set the sample TTL there for retention.
+Confirm the ingest path and port against its configuration docs (qryn
+convention: port 3100, `/api/v1/prom/remote/write`).
+
+=== 2. Dual-write from the scraper (config only)
+
+Add a second endpoint next to the existing Mimir one — see
+`example/prometheus.yml` for the full annotated shape:
+
+[source,yaml]
+----
+remote_write:
+  - url: http://<mimir-host>:9009/api/v1/push
+    name: mimir
+    protobuf_message: io.prometheus.write.v2.Request
+    headers:
+      X-Scope-OrgID: <tenant>
+  - url: http://<gigapipe-host>:3100/api/v1/prom/remote/write
+    name: gigapipe
+    # RW 1.0 (default protobuf_message) — gigapipe's RW 2.0 support is unverified
+----
+
+CAUTION: the ad-hoc `prometheus.env.yaml` lying around locally has the
+`headers`/`name`/`protobuf_message` keys dedented outside the list item —
+that block is invalid YAML and would fail `config::load`. Use the indented
+form above.
+
+=== 3. Validate side by side
+
+* Add a Grafana Prometheus datasource pointing at gigapipe's PromQL API and
+  duplicate the key dashboards onto it. gigapipe's PromQL is its own (WASM)
+  implementation — exercising the real dashboard queries is the actual
+  compatibility test.
+* `up` and `scrape_samples_scraped` counts must match between the two
+  datasources over the same window.
+* Recreate any Mimir-ruler alert rules as Grafana-managed alerts against the
+  gigapipe datasource; force-fire one as a test.
+* Watch per-endpoint scraper telemetry: `remote_write_failed_batches_total`,
+  `remote_write_retries_total`, `remote_write_dropped_series_total` for the
+  `gigapipe` endpoint must stay ~0 under normal load. Watch ClickHouse
+  disk/CPU growth for the new database.
+
+=== 4. Retire Mimir
+
+History is not migrated (there is no practical Mimir-block → ClickHouse
+path). Run dual-write until ClickHouse holds enough history — or keep Mimir
+read-only until its retention window ages out — then remove the `mimir`
+entry from `remote_write`, switch the default Grafana datasource, drop the
+Mimir scrape job, and decommission. `pgo-corpus/mimir.prom` stays: it is a
+pseudonymized parse workload for PGO/benchmarks, valid regardless of Mimir
+running.
+
+[#fallback]
+== Fallback: native ClickHouse sink
+
+If dashboard validation shows gigapipe's PromQL is not compatible enough,
+the fallback is a native sink in the scraper: a sibling of `Endpoint`
+consuming the same `Vec<TimeSeries>` mpsc channel (seam in
+`src/remote_write.rs`), inserting `(metric_name, labels, timestamp_ms,
+value)` rows into an own MergeTree schema via the official `clickhouse`
+crate, configured through a `clickhouse_write:` section next to
+`remote_write:`. Bounded work (config struct + sink task + schema), but it
+moves all dashboards/alerts to SQL — only take it if PromQL compatibility
+fails.
