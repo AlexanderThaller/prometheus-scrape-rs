@@ -56,7 +56,16 @@ Unknown configuration fields are rejected at startup so unsupported setups
 
 Per-target synthetic series (`up`, `scrape_duration_seconds`,
 `scrape_samples_scraped`, `scrape_samples_post_metric_relabeling`,
-`scrape_series_added`) are emitted like Prometheus does. The agent also
+`scrape_series_added`) are emitted like Prometheus does.
+
+Staleness markers are **off by default** and enabled with
+`--staleness.enable-tracking`. Tracking costs one retained (snappy
+compressed) scrape body plus one hash per active series and per target, and
+for most backends the markers only duplicate what missing samples already
+imply. With the flag unset no body is retained, no per-series state is kept,
+and `prometheus_scrape_rs_tracked_series` stays at zero.
+
+The agent also
 exposes its own self-monitoring metrics on `GET /metrics` and pushes them
 via remote-write; see [docs/metrics.md](docs/metrics.md) for the full list.
 

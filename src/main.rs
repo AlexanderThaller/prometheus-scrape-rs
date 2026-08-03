@@ -45,6 +45,10 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// A lightweight Prometheus agent: scrape targets, forward via `remote_write`.
 #[derive(Debug, clap::Parser)]
 #[command(version, about)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent CLI switches, not a state machine"
+)]
 struct Args {
     /// Path to the Prometheus configuration file.
     #[arg(long = "config.file", default_value = "prometheus.yml")]
@@ -61,6 +65,14 @@ struct Args {
     /// Enable the /-/reload and /-/quit lifecycle endpoints.
     #[arg(long = "web.enable-lifecycle")]
     web_enable_lifecycle: bool,
+
+    /// Emit staleness markers for series that stop being exposed.
+    ///
+    /// Off by default: tracking costs one retained (compressed) scrape body
+    /// plus one hash per active series per target, and the markers mostly
+    /// duplicate what the backend already infers from missing samples.
+    #[arg(long = "staleness.enable-tracking")]
+    staleness_enable_tracking: bool,
 
     // Prometheus server flags accepted for drop-in compatibility (e.g. when
     // deployed via prometheus-operator) but without function here. Hidden
@@ -178,7 +190,12 @@ async fn run(args: &Args) -> anyhow::Result<()> {
         let (remote_handle, sender_tasks) =
             remote_write::spawn(&config.remote_write).context("starting remote-write senders")?;
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let scrape_tasks = scrape::spawn_jobs(&config, &remote_handle, &shutdown_rx);
+        let scrape_tasks = scrape::spawn_jobs(
+            &config,
+            &remote_handle,
+            &shutdown_rx,
+            args.staleness_enable_tracking,
+        );
         let self_monitor = tokio::spawn(self_monitor_loop(
             Arc::clone(&config),
             remote_handle.clone(),

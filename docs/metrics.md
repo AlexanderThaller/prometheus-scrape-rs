@@ -34,6 +34,9 @@ per-target labels.
 | `prometheus_scrape_rs_staleness_markers_total` | counter | Staleness markers emitted (stale NaN samples for series that disappeared). |
 | `prometheus_scrape_rs_tracked_series` | gauge | Series currently tracked for staleness detection. |
 
+Both staleness metrics stay at zero unless the agent runs with
+`--staleness.enable-tracking`; staleness tracking is off by default.
+
 ### Remote-write activity
 
 | Metric | Type | Description |

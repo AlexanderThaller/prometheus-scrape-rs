@@ -152,7 +152,7 @@ remote_write:
     let request = runtime.block_on(async move {
         let (handle, _senders) = remote_write::spawn(&config.remote_write)?;
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let _jobs = scrape::spawn_jobs(&config, &handle, &shutdown_rx);
+        let _jobs = scrape::spawn_jobs(&config, &handle, &shutdown_rx, false);
         tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(15)))
             .await?
             .map_err(|_| anyhow::anyhow!("no WriteRequest arrived within 15s"))
@@ -247,7 +247,8 @@ remote_write:
     let marker = runtime.block_on(async move {
         let (handle, _senders) = remote_write::spawn(&config.remote_write)?;
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let _jobs = scrape::spawn_jobs(&config, &handle, &shutdown_rx);
+        // Markers only exist with tracking on (--staleness.enable-tracking).
+        let _jobs = scrape::spawn_jobs(&config, &handle, &shutdown_rx, true);
         tokio::task::spawn_blocking(move || {
             let deadline = std::time::Instant::now() + Duration::from_secs(20);
             while std::time::Instant::now() < deadline {
@@ -378,7 +379,7 @@ remote_write:
     let request = runtime.block_on(async move {
         let (handle, _senders) = remote_write::spawn(&config.remote_write)?;
         let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let _jobs = scrape::spawn_jobs(&config, &handle, &shutdown_rx);
+        let _jobs = scrape::spawn_jobs(&config, &handle, &shutdown_rx, false);
         tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(15)))
             .await?
             .map_err(|_| anyhow::anyhow!("no v2 Request arrived within 15s"))

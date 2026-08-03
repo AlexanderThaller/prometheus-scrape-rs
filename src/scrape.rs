@@ -47,11 +47,16 @@ const EXPORTED_LABEL_PREFIX: &str = "exported_";
 
 /// Spawn one manager task per scrape job. Tasks stop when `shutdown` flips
 /// to true.
+///
+/// `track_staleness` enables staleness markers for series that stop being
+/// exposed (`--staleness.enable-tracking`); with it off no scrape body is
+/// retained and no per-series state is kept.
 #[must_use]
 pub fn spawn_jobs(
     config: &Arc<Config>,
     remote_write: &RemoteWriteHandle,
     shutdown: &watch::Receiver<bool>,
+    track_staleness: bool,
 ) -> Vec<JoinHandle<()>> {
     let external_labels: Arc<[Label]> = config
         .global
@@ -75,6 +80,7 @@ pub fn spawn_jobs(
                 external_labels,
                 remote_write,
                 shutdown,
+                track_staleness,
             ))
         })
         .collect()
@@ -86,6 +92,7 @@ async fn run_job(
     external_labels: Arc<[Label]>,
     remote_write: RemoteWriteHandle,
     mut shutdown: watch::Receiver<bool>,
+    track_staleness: bool,
 ) {
     let client = match crate::auth::build_client(job.timeout(&global), &job.tls_config) {
         Ok(client) => client,
@@ -109,13 +116,14 @@ async fn run_job(
 
     let (mut groups_rx, _sd_tasks) = crate::sd::watch(&job);
     // Running scrape loops keyed by target identity. On discovery change,
-    // only removed targets are stopped (they emit staleness markers) and
-    // only new ones started; unchanged targets keep their series intact.
+    // only removed targets are stopped (emitting staleness markers when
+    // tracking is on) and only new ones started; unchanged targets keep
+    // their series intact.
     let mut running: std::collections::HashMap<u64, RunningTarget> =
         std::collections::HashMap::new();
     loop {
         let groups = groups_rx.borrow_and_update().clone();
-        let targets = build_targets(&job, &global, &groups, &external_labels);
+        let targets = build_targets(&job, &global, &groups, &external_labels, track_staleness);
         let desired: std::collections::HashMap<u64, Target> = targets
             .into_iter()
             .map(|target| (target.identity(), target))
@@ -172,7 +180,7 @@ async fn run_job(
 
 struct RunningTarget {
     /// Signals "this target left the target set": the loop emits staleness
-    /// markers for everything it wrote, then exits.
+    /// markers for everything it wrote (when tracking is on), then exits.
     removed_tx: watch::Sender<bool>,
     handle: JoinHandle<()>,
 }
@@ -189,6 +197,9 @@ struct Target {
     honor_labels: bool,
     honor_timestamps: bool,
     sample_limit: u64,
+    /// Keep per-series state so vanished series get staleness markers.
+    /// Off unless `--staleness.enable-tracking` was given.
+    track_staleness: bool,
     metric_relabel_configs: Vec<RelabelConfig>,
     external_labels: Arc<[Label]>,
 }
@@ -215,6 +226,7 @@ fn build_targets(
     global: &GlobalConfig,
     groups: &[TargetGroup],
     external_labels: &Arc<[Label]>,
+    track_staleness: bool,
 ) -> Vec<Target> {
     let mut targets = Vec::new();
     for group in groups {
@@ -274,6 +286,7 @@ fn build_targets(
                 honor_labels: job.honor_labels,
                 honor_timestamps: job.honor_timestamps,
                 sample_limit: job.sample_limit,
+                track_staleness,
                 metric_relabel_configs: job.metric_relabel_configs.clone(),
                 external_labels: Arc::clone(external_labels),
             });
@@ -309,7 +322,8 @@ async fn scrape_loop(
     // Series written by the previous scrape, for staleness markers. Series
     // carrying explicit exposition timestamps are excluded, matching
     // Prometheus (staleness only applies to scrape-timestamped samples).
-    let mut tracker = SeriesTracker::default();
+    // `None` when tracking is off: no retained body, no hashes, no markers.
+    let mut tracker = target.track_staleness.then(SeriesTracker::default);
     let mut report_series: Vec<Vec<Label>> = Vec::new();
     loop {
         tokio::select! {
@@ -317,6 +331,7 @@ async fn scrape_loop(
             _ = shutdown.wait_for(|stop| *stop) => return,
             _ = removed.wait_for(|gone| *gone) => {
                 // Target left the target set: everything it wrote ends now.
+                let Some(tracker) = &mut tracker else { return };
                 let timestamp = now_ms();
                 let mut markers = tracker.drain_all(&target, timestamp);
                 markers.extend(report_series.drain(..).map(|labels| stale_series(labels, timestamp)));
@@ -362,13 +377,15 @@ async fn scrape_loop(
         last_error = outcome.error;
 
         let mut batch = outcome.series;
-        let markers = tracker.advance(&target, &batch, outcome.retained_body, outcome.start_ms);
-        crate::telemetry::METRICS
-            .staleness_markers_total
-            .add(markers.len() as u64);
-        batch.extend(markers);
-        if report_series.is_empty() {
-            report_series = outcome.report.iter().map(|s| s.labels.clone()).collect();
+        if let Some(tracker) = &mut tracker {
+            let markers = tracker.advance(&target, &batch, outcome.retained_body, outcome.start_ms);
+            crate::telemetry::METRICS
+                .staleness_markers_total
+                .add(markers.len() as u64);
+            batch.extend(markers);
+            if report_series.is_empty() {
+                report_series = outcome.report.iter().map(|s| s.labels.clone()).collect();
+            }
         }
         batch.extend(outcome.report);
         remote_write.send(batch);
@@ -605,8 +622,8 @@ fn stale_series(labels: Vec<Label>, timestamp: i64) -> TimeSeries {
 struct ScrapeOutcome {
     series: Vec<TimeSeries>,
     report: Vec<TimeSeries>,
-    /// Raw exposition body, present only when `series` was actually
-    /// emitted — staleness tracking must reflect what was sent.
+    /// Raw exposition body, present only when staleness tracking is on and
+    /// `series` was actually emitted — tracking must reflect what was sent.
     retained_body: Option<bytes::Bytes>,
     start_ms: i64,
     error: Option<String>,
@@ -664,7 +681,9 @@ async fn scrape_once(
                                 batch.push(single);
                             }
                             kept = batch.len();
-                            retained_body = Some(body);
+                            if target.track_staleness {
+                                retained_body = Some(body);
+                            }
                         }
                     }
                     Err(err) => {
@@ -891,6 +910,7 @@ mod tests {
             honor_labels: false,
             honor_timestamps: true,
             sample_limit: 0,
+            track_staleness: true,
             metric_relabel_configs: Vec::new(),
             external_labels: Arc::new([Label::new("origin", "tracker-test")]),
         }
@@ -1073,7 +1093,7 @@ relabel_configs:
             targets: vec!["a:8080".into(), "drop-me:8080".into()],
             labels: [("env".to_owned(), "prod".to_owned())].into(),
         }];
-        let targets = build_targets(&job, &global, &groups, &external);
+        let targets = build_targets(&job, &global, &groups, &external, false);
         assert_eq!(targets.len(), 1);
         let target = &targets[0];
         assert_eq!(target.url, "http://a:8080/custom");
@@ -1085,6 +1105,10 @@ relabel_configs:
         assert_eq!(get_label(&target.labels, "instance"), "a:8080");
         assert_eq!(get_label(&target.labels, "environment"), "prod");
         assert!(!target.labels.iter().any(|l| l.name.starts_with("__")));
+        assert!(
+            !target.track_staleness,
+            "staleness tracking is opt-in per --staleness.enable-tracking"
+        );
         Ok(())
     }
 }
