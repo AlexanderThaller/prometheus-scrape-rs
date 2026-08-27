@@ -2,9 +2,10 @@ load("@crates//:defs.bzl", "aliases", "all_crate_deps", "edition", "lint_config"
 load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy", "rustfmt_test")
 
-# Referenced from .bazelrc by the clippy and rustfmt configs, which point the
-# rules_rust label_flags at these files.
+# .bazelrc points the rules_rust clippy.toml and rustfmt.toml label_flags at
+# these, so they need to be addressable as labels.
 exports_files([
     ".clippy.toml",
     ".rustfmt.toml",
@@ -33,6 +34,22 @@ rust_binary(
     deps = all_crate_deps(normal = True) + [":prometheus_scrape_rs"],
 )
 
+# [[bench]] harness = false, so criterion supplies main() and this is an
+# ordinary binary rather than a test. It exists so the clippy and rustfmt
+# aspects still cover benches/ once the Cargo workflows are gone -- CLAUDE.md
+# notes --all-targets is where several real failures have hidden.
+rust_binary(
+    name = "benchmarks",
+    srcs = ["benches/benchmarks.rs"],
+    aliases = aliases(),
+    edition = edition(),
+    lint_config = lint_config(),
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ) + [":prometheus_scrape_rs"],
+)
+
 rust_test(
     name = "prometheus_scrape_rs_test",
     size = "small",
@@ -49,4 +66,31 @@ rust_test(
         normal = True,
         normal_dev = True,
     ),
+)
+
+# Clippy and rustfmt as ordinary targets rather than aspects behind a
+# --config, so a single `bazel test //...` covers build, test, lint and
+# format without any invocation discarding another's analysis cache.
+#
+# ALL_TARGETS deliberately includes the test and the bench: `cargo clippy
+# --all-targets` checks both, and CLAUDE.md notes --all-targets is where
+# several real failures have hidden.
+ALL_TARGETS = [
+    ":prometheus_scrape_rs",
+    ":prometheus-scrape-rs",
+    ":prometheus_scrape_rs_test",
+    ":benchmarks",
+]
+
+# testonly because it depends on the test target.
+rust_clippy(
+    name = "clippy",
+    testonly = True,
+    deps = ALL_TARGETS,
+)
+
+rustfmt_test(
+    name = "rustfmt",
+    size = "small",
+    targets = ALL_TARGETS,
 )
