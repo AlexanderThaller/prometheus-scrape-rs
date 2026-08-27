@@ -1,0 +1,17 @@
+# Directories Bazel must not descend into when expanding //....
+#
+# Bazel ignores its own bazel-* convenience symlinks at the workspace root, but
+# not ones further down. A git worktree under .claude/worktrees has its own set
+# pointing at its execroot, so //... followed them into external repositories
+# and failed loading packages that were never ours:
+#
+#   error loading package '.claude/worktrees/<name>/bazel-<name>/external/llvm+/
+#   config/bootstrap': Label '//config:defs.bzl' is invalid because 'config' is
+#   not a package
+#
+# .gitignore does not help here; package loading does not consult it.
+.claude
+
+# Cargo's build directory. No BUILD files, but it is large and globbing it is
+# wasted work.
+target
