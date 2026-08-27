@@ -1,0 +1,36 @@
+# Cargo profile equivalents.
+#
+# Bazel has no notion of a named Cargo profile -- it has -c fastbuild/dbg/opt
+# -- so the two custom profiles in Cargo.toml are reproduced here as --config
+# shorthands. Keep these in sync with [profile.deploy] and [profile.profiling].
+#
+# `extra_rustc_flag` (singular) is the repeatable form and accumulates; the
+# plural `extra_rustc_flags` would clobber on each use. Neither applies to the
+# exec configuration, so build scripts and proc-macros keep the default panic
+# strategy, matching what Cargo does.
+
+# [profile.deploy]: inherits release, lto = true, codegen-units = 1,
+# panic = "abort".
+#
+# Name the binary, not `//...`: rustc requires one panic strategy across the
+# whole crate graph and libtest needs unwind, so the test target cannot build
+# here. `cargo test --profile deploy` fails for the same reason. Use
+#   bazel build --config=deploy //:prometheus-scrape-rs
+build:deploy --compilation_mode=opt
+build:deploy --@rules_rust//rust/settings:lto=fat
+build:deploy --@rules_rust//rust/settings:codegen_units=1
+build:deploy --@rules_rust//rust/settings:extra_rustc_flag=-Cpanic=abort
+
+# [profile.profiling]: inherits deploy, plus debug = true and panic = "unwind".
+# -Cstrip=none and --strip=never are needed on top of -Cdebuginfo=2 because
+# -c opt otherwise strips the symbols back out at link time.
+build:profiling --config=deploy
+build:profiling --@rules_rust//rust/settings:extra_rustc_flag=-Cpanic=unwind
+build:profiling --@rules_rust//rust/settings:extra_rustc_flag=-Cdebuginfo=2
+build:profiling --@rules_rust//rust/settings:extra_rustc_flag=-Cstrip=none
+build:profiling --strip=never
+
+# The Containerfile passes BASE_RUSTFLAGS="-C target-cpu=x86-64-v3" alongside
+# the profile rather than baking it into it, so it stays a separate config here
+# too. Combine as needed: --config=deploy --config=x86-64-v3
+build:x86-64-v3 --@rules_rust//rust/settings:extra_rustc_flag=-Ctarget-cpu=x86-64-v3
