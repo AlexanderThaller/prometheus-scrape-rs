@@ -35,18 +35,12 @@ jobs:
           disk-cache: ${{ github.workflow }}
           cache-save: ${{ github.event_name != 'pull_request' }}
 
+      # One invocation covers build, test, clippy and rustfmt: the latter two
+      # are ordinary targets in BUILD.bazel rather than aspects behind a
+      # --config, so nothing here discards another step's analysis cache.
+      #
       # --lockfile_mode=error fails the build if MODULE.bazel.lock does not
       # match MODULE.bazel, rather than silently regenerating it, so a stale
       # committed lockfile is caught here instead of drifting.
-      - name: Build and test
+      - name: Build, test, clippy and rustfmt
         run: bazel test --lockfile_mode=error //...
-
-      # Both run as aspects over the same targets, so they reuse the compiled
-      # dependencies already in the disk cache from the step above. Changing
-      # --config discards Bazel's in-memory analysis cache but not the action
-      # cache, so these cost re-analysis rather than recompilation.
-      - name: Clippy
-        run: bazel build --config=clippy //...
-
-      - name: Rustfmt
-        run: bazel build --config=rustfmt //...
