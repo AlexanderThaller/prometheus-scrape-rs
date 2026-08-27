@@ -3,3 +3,8 @@
 # generated from these by `cargo run --example sanitize_corpus`; the originals
 # carry hostnames, tenant names and hardware identifiers and must stay local.
 /corpus-raw
+
+# Bazel convenience symlinks into the output base, plus any developer-local
+# rc file. MODULE.bazel.lock is intentionally tracked.
+/bazel-*
+/user.bazelrc
