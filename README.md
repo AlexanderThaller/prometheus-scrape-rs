@@ -147,3 +147,32 @@ cargo test           # unit tests + end-to-end pipeline test
 cargo bench          # criterion benchmarks: parser, relabel, encoding
 cargo clippy --all-targets
 ```
+
+There is also a Bazel build, which is what CI runs. Clippy and rustfmt are
+ordinary targets rather than separate invocations, so one `bazel test //...`
+covers tests, lints and formatting:
+
+```sh
+bazel test //...                 # build + tests + clippy + rustfmt
+bazel run //:benchmarks          # the same criterion benchmarks
+bazel build //:clippy            # lints on their own
+bazel test //:rustfmt            # format check on its own
+```
+
+The dependency list, edition and lint configuration are read out of
+`Cargo.toml`, so adding a crate there needs no `BUILD.bazel` change. `Cargo.lock`
+is the source of truth for versions; `MODULE.bazel.lock` records the resolved
+set and is committed.
+
+Release builds mirror the Cargo profiles of the same name:
+
+```sh
+bazel build --config=deploy //:prometheus-scrape-rs     # lto, 1 CGU, panic=abort
+bazel build --config=profiling //:prometheus-scrape-rs  # deploy + debug symbols
+```
+
+`--config=deploy` has to name the binary rather than `//...`: rustc requires a
+single panic strategy across the whole crate graph and libtest needs unwinding,
+so the test target cannot build under `panic=abort`. `cargo test --profile
+deploy` fails the same way. Note the container image adds PGO on top of the
+profile, which the Bazel build does not replicate.
