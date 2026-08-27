@@ -1,0 +1,52 @@
+name: Bazel
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+permissions:
+  contents: read
+
+jobs:
+  bazel:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # Restores three separate caches through actions/cache: the Bazel binary
+      # itself (keyed on .bazelversion), the repository cache of downloaded
+      # external archives (keyed on MODULE.bazel.lock), and the disk cache of
+      # action outputs. Without these every run re-downloads the Rust toolchain
+      # and recompiles all ~500 crates from scratch.
+      #
+      # cache-save is limited to pushes so pull requests read the main-branch
+      # cache without each PR writing its own copy. GitHub evicts least-recently
+      # used entries once a repository exceeds 10 GB in total.
+      # https://github.com/bazel-contrib/setup-bazel
+      - name: Set up Bazel with caching
+        uses: bazel-contrib/setup-bazel@c5acdfb288317d0b5c0bbd7a396a3dc868bb0f86 # 0.19.0
+        with:
+          bazelisk-cache: true
+          repository-cache: true
+          disk-cache: ${{ github.workflow }}
+          cache-save: ${{ github.event_name != 'pull_request' }}
+
+      # --lockfile_mode=error fails the build if MODULE.bazel.lock does not
+      # match MODULE.bazel, rather than silently regenerating it, so a stale
+      # committed lockfile is caught here instead of drifting.
+      - name: Build and test
+        run: bazel test --lockfile_mode=error //...
+
+      # Both run as aspects over the same targets, so they reuse the compiled
+      # dependencies already in the disk cache from the step above. Changing
+      # --config discards Bazel's in-memory analysis cache but not the action
+      # cache, so these cost re-analysis rather than recompilation.
+      - name: Clippy
+        run: bazel build --config=clippy //...
+
+      - name: Rustfmt
+        run: bazel build --config=rustfmt //...

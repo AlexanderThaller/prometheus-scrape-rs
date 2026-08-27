@@ -1,0 +1,52 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps", "edition", "lint_config")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+# Referenced from .bazelrc by the clippy and rustfmt configs, which point the
+# rules_rust label_flags at these files.
+exports_files([
+    ".clippy.toml",
+    ".rustfmt.toml",
+])
+
+rust_library(
+    name = "prometheus_scrape_rs",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    aliases = aliases(),
+    edition = edition(),
+    lint_config = lint_config(),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(normal = True),
+)
+
+rust_binary(
+    name = "prometheus-scrape-rs",
+    srcs = ["src/main.rs"],
+    aliases = aliases(),
+    edition = edition(),
+    lint_config = lint_config(),
+    visibility = ["//visibility:public"],
+    deps = all_crate_deps(normal = True) + [":prometheus_scrape_rs"],
+)
+
+rust_test(
+    name = "prometheus_scrape_rs_test",
+    size = "small",
+    aliases = aliases(),
+    crate = ":prometheus_scrape_rs",
+    data = glob(["pgo-corpus/*.prom"]),
+    edition = edition(),
+    lint_config = lint_config(),
+    # src/remote_write.rs reads env!("CARGO_MANIFEST_DIR") to locate pgo-corpus.
+    # Pin it to a runfiles-relative path so no absolute execroot is baked into
+    # the test binary (process_wrapper rejects that).
+    rustc_env = {"CARGO_MANIFEST_DIR": "."},
+    deps = all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)
