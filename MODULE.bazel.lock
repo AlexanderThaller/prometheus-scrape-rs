@@ -992,6 +992,18 @@
       "zmij_1.0.21": "{\"dependencies\":[{\"default_features\":false,\"kind\":\"dev\",\"name\":\"criterion\",\"req\":\"^0.8\",\"target\":\"cfg(not(miri))\"},{\"name\":\"no-panic\",\"optional\":true,\"req\":\"^0.1.36\"},{\"kind\":\"dev\",\"name\":\"num-bigint\",\"req\":\"^0.4\"},{\"kind\":\"dev\",\"name\":\"num-integer\",\"req\":\"^0.1\"},{\"kind\":\"dev\",\"name\":\"num_cpus\",\"req\":\"^1.8\"},{\"kind\":\"dev\",\"name\":\"opt-level\",\"req\":\"^1\"},{\"kind\":\"dev\",\"name\":\"rand\",\"req\":\"^0.10\"},{\"kind\":\"dev\",\"name\":\"ryu\",\"req\":\"^1\"}],\"features\":{}}"
     },
     "@@rules_rs+//rs/toolchains:module_extension.bzl%toolchains": {
+      "2026-08-25/rustc-nightly-aarch64-apple-darwin.tar.xz": "dcb5e5e4d2b971fe42283d33c619060fd085262b750f51858e6972d38be72256",
+      "2026-08-25/rustc-nightly-aarch64-pc-windows-msvc.tar.xz": "485deaed2b67695c711ed87c16ff6ffe99ef4ad4929aec42123835d99be0db8f",
+      "2026-08-25/rustc-nightly-aarch64-unknown-linux-gnu.tar.xz": "ee1997a15f0f920de6de19de6c4105d7b00e17a2ef29ff1ef81120bfa42c3a78",
+      "2026-08-25/rustc-nightly-x86_64-apple-darwin.tar.xz": "c3ffd1857fff0072a72f12c5308bea75777c729d301509530af25b244af28d92",
+      "2026-08-25/rustc-nightly-x86_64-pc-windows-msvc.tar.xz": "657fb2df5cd24a20fc012f9c3e1512e8ec74a59d281559de986874230803faa5",
+      "2026-08-25/rustc-nightly-x86_64-unknown-linux-gnu.tar.xz": "eb1c795ac9948ed837a542ec12abf3a0cd12af7ae5eeeded34f242aa4d8c8dcd",
+      "2026-08-25/rustfmt-nightly-aarch64-apple-darwin.tar.xz": "90c4e8e54063b74f9d62f03c139e745caa0af2b94b909bec803ac952049ef8a9",
+      "2026-08-25/rustfmt-nightly-aarch64-pc-windows-msvc.tar.xz": "fc2e20948b768c22d11e438d65e0c201b0054d56ad231e115861f2a312399ccd",
+      "2026-08-25/rustfmt-nightly-aarch64-unknown-linux-gnu.tar.xz": "81198ec784e8db310b48d4745db0b62b219282e3784df51554aab1895ff601b5",
+      "2026-08-25/rustfmt-nightly-x86_64-apple-darwin.tar.xz": "34f2730950b57c8885bf4ad62349ec5da1bc3d87ca5ca8f3a5dc00e347c1baf8",
+      "2026-08-25/rustfmt-nightly-x86_64-pc-windows-msvc.tar.xz": "5fccc142b7fb90162e00ab84d82075e45eead600ce4a70a7e58d1bc4b8e051c0",
+      "2026-08-25/rustfmt-nightly-x86_64-unknown-linux-gnu.tar.xz": "4a6ea3c15b95324f14233180983aad43ee274a3ffd9a04ea049980a2bb7452a9",
       "cargo-1.98.0-aarch64-apple-darwin.tar.xz": "2c2a8bbf3cba4353c0ca2cf1ba8280603f3ca82ceebb538fee4a1a987147f743",
       "cargo-1.98.0-aarch64-pc-windows-msvc.tar.xz": "6d939ba34b790d4e03cdaca6c1568d9bc14cdb7b06c29c6213c266ea70478b6b",
       "cargo-1.98.0-aarch64-unknown-linux-gnu.tar.xz": "5784379d73ac881d15a9e67eed2882cd58c747c276221c23cdf9aff37e015ff6",
@@ -1087,13 +1099,7 @@
       "rustc-1.98.0-src.tar.xz": "271fa73d8174f53d713c46a8310da7bf7cfdcfb8b7cfd1c2b74b84a83ae9fb1e",
       "rustc-1.98.0-x86_64-apple-darwin.tar.xz": "c82d8f536955a9d6fc4465637fce5dcacf1d3913a98b5eb7edd9ead5a8b3f509",
       "rustc-1.98.0-x86_64-pc-windows-msvc.tar.xz": "a29cdefc01c747e15270ec64878adba4b0a88afaa7f19e3abf9231106fbd381b",
-      "rustc-1.98.0-x86_64-unknown-linux-gnu.tar.xz": "0e37cb339f447fc44d6d781073bacacebfdc5612f2600e4c7e84c266f5f3aced",
-      "rustfmt-1.98.0-aarch64-apple-darwin.tar.xz": "cec1b153c2331a94a6c8344ac54887917d89a0eef935d9e827bb553713b2f9fa",
-      "rustfmt-1.98.0-aarch64-pc-windows-msvc.tar.xz": "eb10a94fb8859b65ea75a961ffab5857f660849a8975f19590f73e2da334a92a",
-      "rustfmt-1.98.0-aarch64-unknown-linux-gnu.tar.xz": "8da40e8c7eb1a7619f6b2c74c6351d288a6d8c4e06324fb5a60c14290219c47e",
-      "rustfmt-1.98.0-x86_64-apple-darwin.tar.xz": "0945a6319424dfb3fb711477de73b4f3f913b2c4a549a4b5a959086f1f19ecd4",
-      "rustfmt-1.98.0-x86_64-pc-windows-msvc.tar.xz": "1b66545c22f29edea5d2485b021f5b3fa02426f632938dec2929e34c1f723860",
-      "rustfmt-1.98.0-x86_64-unknown-linux-gnu.tar.xz": "8922a03e68265a74a8040590e28b173fb5d9d49655bb6eacfd880fbd3bef0dc3"
+      "rustc-1.98.0-x86_64-unknown-linux-gnu.tar.xz": "0e37cb339f447fc44d6d781073bacacebfdc5612f2600e4c7e84c266f5f3aced"
     }
   },
   "factsVersions": {}

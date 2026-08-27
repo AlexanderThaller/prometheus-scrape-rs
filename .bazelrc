@@ -34,3 +34,21 @@ build:profiling --strip=never
 # the profile rather than baking it into it, so it stays a separate config here
 # too. Combine as needed: --config=deploy --config=x86-64-v3
 build:x86-64-v3 --@rules_rust//rust/settings:extra_rustc_flag=-Ctarget-cpu=x86-64-v3
+
+# Lint and format checks, mirroring the commands in CLAUDE.md.
+#
+# Both run as aspects over the normal targets rather than as separate rules, so
+# `//...` covers every Rust target without extra BUILD boilerplate.
+
+# cargo clippy --all-targets --all-features -- -D warnings
+build:clippy --aspects=@rules_rust//rust:defs.bzl%rust_clippy_aspect
+build:clippy --output_groups=+clippy_checks
+build:clippy --@rules_rust//rust/settings:clippy.toml=//:.clippy.toml
+build:clippy --@rules_rust//rust/settings:clippy_flag=-Dwarnings
+
+# cargo +nightly fmt --all -- --check. .rustfmt.toml uses unstable options
+# (imports_granularity, format_strings, ...), which is why the toolchain in
+# MODULE.bazel pins a nightly rustfmt alongside the stable rustc.
+build:rustfmt --aspects=@rules_rust//rust:defs.bzl%rustfmt_aspect
+build:rustfmt --output_groups=+rustfmt_checks
+build:rustfmt --@rules_rust//rust/settings:rustfmt.toml=//:.rustfmt.toml

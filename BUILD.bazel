@@ -3,6 +3,13 @@ load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
 load("@rules_rs//rs:rust_library.bzl", "rust_library")
 load("@rules_rs//rs:rust_test.bzl", "rust_test")
 
+# Referenced from .bazelrc by the clippy and rustfmt configs, which point the
+# rules_rust label_flags at these files.
+exports_files([
+    ".clippy.toml",
+    ".rustfmt.toml",
+])
+
 rust_library(
     name = "prometheus_scrape_rs",
     srcs = glob(

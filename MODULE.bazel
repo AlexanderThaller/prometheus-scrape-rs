@@ -3,6 +3,10 @@ bazel_dep(name = "rules_rs", version = "0.0.107")
 toolchains = use_extension("@rules_rs//rs/toolchains:module_extension.bzl", "toolchains")
 toolchains.toolchain(
     edition = "2024",
+    # .rustfmt.toml uses unstable options (imports_granularity, format_strings,
+    # ...), so the format check needs a nightly rustfmt even though rustc is
+    # stable. This mirrors `cargo +nightly fmt` in CLAUDE.md.
+    rustfmt_version = "nightly/2026-08-25",
     version = "1.98.0",
 )
 use_repo(toolchains, "default_rust_toolchains")
