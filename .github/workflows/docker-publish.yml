@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Full history and tags so `git describe` below can find the
           # nearest tag instead of just falling back to the short commit.
