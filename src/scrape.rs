@@ -185,6 +185,14 @@ struct RunningTarget {
     handle: JoinHandle<()>,
 }
 
+/// Initial body buffer for a response that announces no `Content-Length`
+/// (every gzipped one).
+const DEFAULT_BODY_CAPACITY: u64 = 64 * 1024;
+
+/// Upper bound on what a single announced `Content-Length` may pre-allocate;
+/// beyond it the buffer grows as the body actually arrives.
+const MAX_PREALLOCATED_BODY: u64 = 8 * 1024 * 1024;
+
 /// A fully resolved scrape target.
 #[derive(Debug)]
 struct Target {
@@ -197,6 +205,9 @@ struct Target {
     honor_labels: bool,
     honor_timestamps: bool,
     sample_limit: u64,
+    /// Maximum decoded response body accepted from the target, in bytes.
+    /// `0` disables the limit.
+    body_size_limit: u64,
     /// Keep per-series state so vanished series get staleness markers.
     /// Off unless `--staleness.enable-tracking` was given.
     track_staleness: bool,
@@ -286,6 +297,7 @@ fn build_targets(
                 honor_labels: job.honor_labels,
                 honor_timestamps: job.honor_timestamps,
                 sample_limit: job.sample_limit,
+                body_size_limit: job.body_size_limit.as_bytes(),
                 track_staleness,
                 metric_relabel_configs: job.metric_relabel_configs.clone(),
                 external_labels: Arc::clone(external_labels),
@@ -752,12 +764,45 @@ async fn fetch(
     if !target.params.is_empty() {
         builder = builder.query(&target.params);
     }
-    let response = credentials.apply(builder).send().await?;
+    let mut response = credentials.apply(builder).send().await?;
     let status = response.status();
     if !status.is_success() {
         anyhow::bail!("server returned HTTP {status}");
     }
-    Ok(response.bytes().await?)
+    read_body(&mut response, target.body_size_limit).await
+}
+
+/// Read the response body, refusing to buffer more than `limit` decoded bytes
+/// (`0` disables the limit).
+///
+/// The body is streamed rather than taken with `Response::bytes()`: an
+/// announced `Content-Length` covers neither chunked nor gzipped responses, so
+/// only a running count of the decoded bytes bounds what a hostile or broken
+/// target can make the agent allocate.
+async fn read_body(response: &mut reqwest::Response, limit: u64) -> anyhow::Result<bytes::Bytes> {
+    let announced = response.content_length();
+    if limit > 0
+        && let Some(length) = announced
+        && length > limit
+    {
+        anyhow::bail!("response body is {length} bytes, over body_size_limit of {limit}");
+    }
+
+    // Size to what the target announced (bounded by the limit, since the
+    // announcement is unverified); gzipped responses announce nothing, so
+    // those grow from a modest start.
+    let capacity = announced
+        .unwrap_or(DEFAULT_BODY_CAPACITY)
+        .min(if limit == 0 { u64::MAX } else { limit })
+        .min(MAX_PREALLOCATED_BODY);
+    let mut body = bytes::BytesMut::with_capacity(usize::try_from(capacity).unwrap_or(usize::MAX));
+    while let Some(chunk) = response.chunk().await? {
+        if limit > 0 && body.len() as u64 + chunk.len() as u64 > limit {
+            anyhow::bail!("response body exceeds body_size_limit of {limit} bytes");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body.freeze())
 }
 
 /// The deterministic series-building pipeline: merge target labels, apply
@@ -910,6 +955,7 @@ mod tests {
             honor_labels: false,
             honor_timestamps: true,
             sample_limit: 0,
+            body_size_limit: 0,
             track_staleness: true,
             metric_relabel_configs: Vec::new(),
             external_labels: Arc::new([Label::new("origin", "tracker-test")]),
