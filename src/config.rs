@@ -512,11 +512,14 @@ fn validate_url(url: &str) -> anyhow::Result<()> {
 /// is a few MB) and far below what would exhaust a scraping agent.
 const DEFAULT_BODY_SIZE_LIMIT: u64 = 128 * 1024 * 1024;
 
-/// A Prometheus-style byte size, e.g. `100MB`, `64MiB`, `1048576`, `0`.
+/// A Prometheus-style byte size, e.g. `100MB`, `64MiB`, `1.5GiB`, `1048576`,
+/// `0`.
 ///
 /// Mirrors the `units.Base2Bytes` syntax Prometheus accepts for
-/// `body_size_limit`: a bare number is bytes and every unit suffix is a power
-/// of 1024, so `1KB` and `1KiB` both mean 1024 bytes. `0` means "no limit".
+/// `body_size_limit`: every unit suffix is a power of 1024, so `1KB` and
+/// `1KiB` both mean 1024 bytes; values may be fractional (`1.5MiB`) and
+/// components may be concatenated (`1MiB512KiB`, summed). A bare number is
+/// bytes, and `0` means "no limit".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromSize(u64);
 
@@ -558,33 +561,75 @@ impl PromSize {
         if input.is_empty() {
             return Err(PromSizeError::Empty);
         }
-        let digits_len = input
-            .as_bytes()
-            .iter()
-            .take_while(|byte| byte.is_ascii_digit())
-            .count();
-        if digits_len == 0 {
-            return Err(PromSizeError::InvalidFormat(input.to_owned()));
+        // A bare byte count (`0`, `1048576`) carries no unit component and so
+        // does not go through the loop below.
+        if input.bytes().all(|byte| byte.is_ascii_digit()) {
+            return input
+                .parse()
+                .map(Self)
+                .map_err(|_err| PromSizeError::NumberOverflow(input.to_owned()));
         }
-        let (digits, suffix) = input.split_at(digits_len);
-        let number: u64 = digits
-            .parse()
-            .map_err(|_err| PromSizeError::NumberOverflow(input.to_owned()))?;
 
-        let suffix = suffix.trim_start();
-        if suffix.is_empty() {
-            return Ok(Self(number));
+        // `units.ParseUnit`'s grammar, which is a *sequence* of
+        // `<number><unit>` components: `1.5MiB` and `1MiB512KiB` are both
+        // valid, and components are summed rather than ordered.
+        let mut remaining = input;
+        let mut total: u64 = 0;
+        while !remaining.is_empty() {
+            let whole_len = leading_digits(remaining);
+            let (whole, rest) = remaining.split_at(whole_len);
+            let (fraction, rest) = match rest.strip_prefix('.') {
+                Some(after_point) => after_point.split_at(leading_digits(after_point)),
+                None => ("", rest),
+            };
+            if whole.is_empty() && fraction.is_empty() {
+                return Err(PromSizeError::InvalidFormat(input.to_owned()));
+            }
+
+            // The unit runs to the next digit or decimal point. Non-ASCII
+            // bytes land inside it and simply fail to match a known unit.
+            let unit_len = rest
+                .bytes()
+                .take_while(|byte| !byte.is_ascii_digit() && *byte != b'.')
+                .count();
+            let (unit, next) = rest.split_at(unit_len);
+            let bytes_per_unit = UNITS
+                .iter()
+                .find(|(known, _)| *known == unit)
+                .map(|&(_, bytes)| bytes)
+                .ok_or_else(|| PromSizeError::UnknownUnit(input.to_owned()))?;
+
+            let overflow = || PromSizeError::NumberOverflow(input.to_owned());
+            let mut component = if whole.is_empty() {
+                0
+            } else {
+                whole
+                    .parse::<u64>()
+                    .map_err(|_err| overflow())?
+                    .checked_mul(bytes_per_unit)
+                    .ok_or_else(overflow)?
+            };
+            if !fraction.is_empty() {
+                // Truncating integer maths rather than f64: `units` rounds
+                // its float total down too, and this keeps large units exact.
+                // Digits past the 19th cannot move a `u64` byte count.
+                let digits = &fraction[..fraction.len().min(19)];
+                let scale = 10u128.pow(u32::try_from(digits.len()).unwrap_or(u32::MAX));
+                let numerator = u128::from(digits.parse::<u64>().map_err(|_err| overflow())?)
+                    * u128::from(bytes_per_unit);
+                let part = u64::try_from(numerator / scale).map_err(|_err| overflow())?;
+                component = component.checked_add(part).ok_or_else(overflow)?;
+            }
+            total = total.checked_add(component).ok_or_else(overflow)?;
+            remaining = next;
         }
-        let bytes_per_unit = UNITS
-            .iter()
-            .find(|(unit, _)| *unit == suffix)
-            .map(|&(_, bytes)| bytes)
-            .ok_or_else(|| PromSizeError::UnknownUnit(input.to_owned()))?;
-        number
-            .checked_mul(bytes_per_unit)
-            .map(Self)
-            .ok_or_else(|| PromSizeError::NumberOverflow(input.to_owned()))
+        Ok(Self(total))
     }
+}
+
+/// Length of the leading run of ASCII digits in `input`.
+fn leading_digits(input: &str) -> usize {
+    input.bytes().take_while(u8::is_ascii_digit).count()
 }
 
 #[derive(Debug, Clone, thiserror::Error)]
@@ -813,6 +858,33 @@ global:
             let yaml = format!("job_name: j\nbody_size_limit: \"{input}\"\n");
             serde_saphyr::from_str::<ScrapeConfig>(&yaml)
                 .expect_err(&format!("{input:?} must be rejected"));
+        }
+    }
+
+    #[test]
+    fn parses_fractional_and_concatenated_sizes() {
+        // The `units.ParseUnit` grammar: [0-9]*(\.[0-9]*)?<unit>, repeated.
+        for (input, want) in [
+            ("1.5MiB", 1024 * 1024 + 512 * 1024),
+            ("0.5GiB", 512 * 1024 * 1024),
+            (".5MiB", 512 * 1024),
+            ("1.MiB", 1024 * 1024),
+            ("1MiB512KiB", 1024 * 1024 + 512 * 1024),
+            ("1GB512MB1KB", 1024 * 1024 * 1024 + 512 * 1024 * 1024 + 1024),
+            // Components are summed, not required to descend.
+            ("512KiB1MiB", 1024 * 1024 + 512 * 1024),
+            // A fraction that does not divide evenly truncates.
+            ("1.1KiB", 1126),
+        ] {
+            assert_eq!(
+                PromSize::parse(input).expect("must parse").as_bytes(),
+                want,
+                "input {input:?}"
+            );
+        }
+        // A component without a unit is not part of the grammar.
+        for input in ["1MiB512", ".MiB", "1.5", "1.5.5MiB"] {
+            PromSize::parse(input).expect_err(&format!("{input:?} must be rejected"));
         }
     }
 
