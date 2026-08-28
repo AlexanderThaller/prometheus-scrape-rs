@@ -9,12 +9,29 @@
 //!
 //! Reference: <https://prometheus.io/docs/instrumenting/exposition_formats/>
 
+use std::collections::HashSet;
+
+use compact_str::CompactString;
+
 use crate::model::{
     Label,
     METRIC_NAME_LABEL,
     Sample,
     TimeSeries,
 };
+
+/// Hard cap on the labels of a single series, `__name__` included.
+///
+/// No legitimate exposition line comes close; the cap keeps a hostile target
+/// from making one line cost arbitrarily much time and memory.
+const MAX_LABELS_PER_SERIES: usize = 128;
+
+/// Label count up to which duplicate names are detected with a linear scan
+/// over the labels parsed so far.
+///
+/// Real series sit far below this, so the common path never builds a set.
+/// Past it the scan would turn quadratic, so the names move into one.
+const DUPLICATE_SCAN_LINEAR_LIMIT: usize = 32;
 
 /// Error produced when a scrape body cannot be parsed.
 ///
@@ -299,6 +316,54 @@ fn parse_line(
     }))
 }
 
+/// Reject a label name that repeats one already parsed, or that would take the
+/// series past [`MAX_LABELS_PER_SERIES`].
+///
+/// `seen` is the duplicate index maintained by [`record_label_name`]; while it
+/// is `None` the check is a linear scan over `labels`, which is cheaper for the
+/// label counts real series carry.
+fn check_label_name(
+    name: &str,
+    line_no: usize,
+    labels: &[Label],
+    seen: Option<&HashSet<CompactString>>,
+) -> Result<(), ParseError> {
+    let duplicate = match seen {
+        Some(seen) => seen.contains(name),
+        None => labels.iter().any(|l| l.name == name),
+    };
+    if duplicate {
+        return Err(ParseError::new(
+            line_no,
+            format!("duplicate label name: {name:?}"),
+        ));
+    }
+    if labels.len() >= MAX_LABELS_PER_SERIES {
+        return Err(ParseError::new(
+            line_no,
+            format!("too many labels (limit {MAX_LABELS_PER_SERIES})"),
+        ));
+    }
+    Ok(())
+}
+
+/// Record `name` (just appended to `labels`) in the duplicate index, building
+/// the index once the line crosses [`DUPLICATE_SCAN_LINEAR_LIMIT`] labels —
+/// past that the linear scan in [`check_label_name`] would be quadratic.
+fn record_label_name(name: &str, labels: &[Label], seen: &mut Option<HashSet<CompactString>>) {
+    match seen {
+        Some(seen) => {
+            seen.insert(CompactString::new(name));
+        }
+        // Seeded from what was parsed so far, `__name__` included (braces may
+        // not repeat it anyway).
+        None if labels.len() > DUPLICATE_SCAN_LINEAR_LIMIT => {
+            *seen = Some(labels.iter().map(|l| l.name.clone()).collect());
+        }
+        None => {}
+    }
+}
+
 /// Parse the label set starting at `bytes[open]` (which must be `{`). Returns
 /// the index just past the closing `}`.
 fn parse_labels(
@@ -311,6 +376,9 @@ fn parse_labels(
     let bytes = body.as_bytes();
     debug_assert_eq!(bytes[open], b'{');
     let mut i = open + 1;
+    // Duplicate-name index, built only once a line carries more labels than
+    // `DUPLICATE_SCAN_LINEAR_LIMIT`; below that the linear scan is cheaper.
+    let mut seen: Option<HashSet<CompactString>> = None;
 
     loop {
         // Skip whitespace.
@@ -348,12 +416,7 @@ fn parse_labels(
                 "label name '__name__' is not allowed inside braces",
             ));
         }
-        if labels.iter().any(|l| l.name == name) {
-            return Err(ParseError::new(
-                line_no,
-                format!("duplicate label name: {name:?}"),
-            ));
-        }
+        check_label_name(name, line_no, labels, seen.as_ref())?;
 
         // Optional whitespace, then '='.
         while i < end && is_space(bytes[i]) {
@@ -382,6 +445,7 @@ fn parse_labels(
         i = next;
 
         labels.push(Label::new(name, value));
+        record_label_name(name, labels, &mut seen);
 
         // Skip whitespace after value.
         while i < end && is_space(bytes[i]) {
@@ -573,6 +637,8 @@ fn utf8_from(body: &str, start: usize, end: usize, line_no: usize) -> Result<&st
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     const TS: i64 = 1_700_000_000_000;
@@ -860,6 +926,46 @@ rpc_duration_seconds_count 2693
             "message: {}",
             e.message()
         );
+    }
+
+    /// Duplicates are still caught past the point where the linear scan is
+    /// swapped for the hash-set index.
+    #[test]
+    fn error_duplicate_label_beyond_linear_scan() {
+        let mut line = String::from("m{");
+        for n in 0..DUPLICATE_SCAN_LINEAR_LIMIT + 8 {
+            let _ = write!(line, "l{n}=\"1\",");
+        }
+        line.push_str("l0=\"2\"} 5");
+        let e = parse(&line, TS, true).expect_err("dup");
+        assert!(
+            e.message().contains("duplicate"),
+            "message: {}",
+            e.message()
+        );
+    }
+
+    #[test]
+    fn error_too_many_labels() {
+        let mut line = String::from("m{");
+        for n in 0..MAX_LABELS_PER_SERIES {
+            let _ = write!(line, "l{n}=\"1\",");
+        }
+        line.push_str("} 5");
+        let e = parse(&line, TS, true).expect_err("label limit");
+        assert!(
+            e.message().contains("too many labels"),
+            "message: {}",
+            e.message()
+        );
+        // One below the cap (the `__name__` label fills the last slot) parses.
+        let mut ok = String::from("m{");
+        for n in 0..MAX_LABELS_PER_SERIES - 1 {
+            let _ = write!(ok, "l{n}=\"1\",");
+        }
+        ok.push_str("} 5");
+        let series = parse(&ok, TS, true).expect("at limit");
+        assert_eq!(series[0].labels.len(), MAX_LABELS_PER_SERIES);
     }
 
     #[test]
