@@ -516,7 +516,7 @@ const DEFAULT_BODY_SIZE_LIMIT: u64 = 128 * 1024 * 1024;
 ///
 /// Mirrors the `units.Base2Bytes` syntax Prometheus accepts for
 /// `body_size_limit`: a bare number is bytes and every unit suffix is a power
-/// of two, so `1KB` and `1KiB` both mean 1024 bytes. `0` means "no limit".
+/// of 1024, so `1KB` and `1KiB` both mean 1024 bytes. `0` means "no limit".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PromSize(u64);
 
@@ -533,20 +533,25 @@ impl PromSize {
 
     /// Parse a Prometheus size string.
     pub fn parse(input: &str) -> Result<Self, PromSizeError> {
-        // Spelled out rather than case-folded, matching what Prometheus
-        // accepts: the unit is a fixed token, not free text.
+        // The exact token set of Go's `units.ParseBase2Bytes`, which is what
+        // Prometheus parses `body_size_limit` with: `B`, the six IEC
+        // suffixes, and their `B` spellings — all powers of 1024, no
+        // case folding (so `kB` is not a unit).
+        const KI: u64 = 1024;
         const UNITS: &[(&str, u64)] = &[
             ("B", 1),
-            ("KB", 1024),
-            ("kB", 1024),
-            ("KiB", 1024),
-            ("kiB", 1024),
-            ("MB", 1024 * 1024),
-            ("MiB", 1024 * 1024),
-            ("GB", 1024 * 1024 * 1024),
-            ("GiB", 1024 * 1024 * 1024),
-            ("TB", 1024 * 1024 * 1024 * 1024),
-            ("TiB", 1024 * 1024 * 1024 * 1024),
+            ("KB", KI),
+            ("KiB", KI),
+            ("MB", KI.pow(2)),
+            ("MiB", KI.pow(2)),
+            ("GB", KI.pow(3)),
+            ("GiB", KI.pow(3)),
+            ("TB", KI.pow(4)),
+            ("TiB", KI.pow(4)),
+            ("PB", KI.pow(5)),
+            ("PiB", KI.pow(5)),
+            ("EB", KI.pow(6)),
+            ("EiB", KI.pow(6)),
         ];
 
         let input = input.trim();
@@ -792,12 +797,19 @@ global:
             ("64MiB", 64 * 1024 * 1024),
             ("1GB", 1024 * 1024 * 1024),
             ("512B", 512),
+            ("2TiB", 2 * 1024_u64.pow(4)),
+            ("3PB", 3 * 1024_u64.pow(5)),
+            ("3PiB", 3 * 1024_u64.pow(5)),
+            ("1EB", 1024_u64.pow(6)),
+            ("1EiB", 1024_u64.pow(6)),
         ] {
             let yaml = format!("job_name: j\nbody_size_limit: {input}\n");
             let config: ScrapeConfig = serde_saphyr::from_str(&yaml).expect("must parse");
             assert_eq!(config.body_size_limit.as_bytes(), want, "input {input:?}");
         }
-        for input in ["MB", "10PB", "-1", "10 20"] {
+        // `units.ParseBase2Bytes` does not case-fold, so the lowercase
+        // spellings are not units; `20EB` overflows u64.
+        for input in ["MB", "1kB", "1kiB", "1mb", "20EB", "-1", "10 20"] {
             let yaml = format!("job_name: j\nbody_size_limit: \"{input}\"\n");
             serde_saphyr::from_str::<ScrapeConfig>(&yaml)
                 .expect_err(&format!("{input:?} must be rejected"));
