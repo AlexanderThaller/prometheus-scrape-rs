@@ -37,7 +37,7 @@ The agent-mode subset of the Prometheus configuration format:
 - `global`: `scrape_interval`, `scrape_timeout`, `external_labels`
 - `scrape_configs`: `job_name`, `metrics_path`, `scheme`, `params`,
   `scrape_interval`/`scrape_timeout` overrides, `honor_labels`,
-  `honor_timestamps`, `sample_limit`, `basic_auth`, `authorization`,
+  `honor_timestamps`, `sample_limit`, `body_size_limit`, `basic_auth`, `authorization`,
   `bearer_token(_file)`, `tls_config` (`insecure_skip_verify`, `ca_file`),
   `static_configs`, `file_sd_configs`, `kubernetes_sd_configs`,
   `relabel_configs`, `metric_relabel_configs`
@@ -47,6 +47,12 @@ The agent-mode subset of the Prometheus configuration format:
   `max_backoff`), `protobuf_message` (`prometheus.WriteRequest` default,
   or `io.prometheus.write.v2.Request` for remote-write 2.0 with its
   symbol table — ~40-60% smaller payloads, supported by Mimir >= 2.17)
+
+`body_size_limit` (`100MB`, `64MiB`, a plain byte count, or `0` to disable)
+caps the decoded response a target may return; the body is streamed and the
+scrape fails once the cap is passed. Unlike Prometheus, which defaults to no
+limit, the default here is 128MiB, so a compromised or broken target cannot
+push the agent out of memory.
 
 Relabeling implements the full Prometheus action set: `replace`, `keep`,
 `drop`, `keepequal`, `dropequal`, `hashmod` (MD5, bit-compatible with

@@ -72,6 +72,37 @@ fn serve_scrape_sequence(listener: &TcpListener, bodies: &[&str]) {
     }
 }
 
+/// Serve a chunked response (so: no `Content-Length`) of at least `total`
+/// bytes of exposition-looking text. Writes stop as soon as the client hangs
+/// up, which is what an enforced body size limit looks like from here.
+fn serve_chunked_scrapes(listener: &TcpListener, total: usize) {
+    let line = "big_metric{filler=\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"} 1\n";
+    let chunk = line.repeat(256);
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        if stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/plain; version=0.0.4\r\ntransfer-encoding: \
+                  chunked\r\nconnection: close\r\n\r\n",
+            )
+            .is_err()
+        {
+            continue;
+        }
+        let mut written = 0usize;
+        while written < total {
+            let framed = format!("{:x}\r\n{chunk}\r\n", chunk.len());
+            if stream.write_all(framed.as_bytes()).is_err() {
+                break;
+            }
+            written += chunk.len();
+        }
+        let _ = stream.write_all(b"0\r\n\r\n");
+    }
+}
+
 /// Accept one remote-write POST, send its decoded body to `tx`, respond 204.
 fn serve_remote_write(listener: &TcpListener, tx: &mpsc::Sender<WriteRequest>) {
     for stream in listener.incoming() {
@@ -409,5 +440,74 @@ remote_write:
         }
     }
     assert!(found_metric, "test_metric not found in v2 request");
+    Ok(())
+}
+
+/// A target streaming more than `body_size_limit` must fail the scrape
+/// instead of buffering the whole body: `up` goes to 0 and no sample from
+/// the oversized body is forwarded.
+#[test]
+fn oversized_scrape_body_is_rejected() -> anyhow::Result<()> {
+    let exporter = TcpListener::bind("127.0.0.1:0")?;
+    let exporter_addr = exporter.local_addr()?;
+    std::thread::spawn(move || serve_chunked_scrapes(&exporter, 4 * 1024 * 1024));
+
+    let receiver = TcpListener::bind("127.0.0.1:0")?;
+    let receiver_addr = receiver.local_addr()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || serve_remote_write(&receiver, &tx));
+
+    let config_yaml = format!(
+        r#"
+global:
+  scrape_interval: 1s
+scrape_configs:
+  - job_name: oversized
+    body_size_limit: 64KB
+    static_configs:
+      - targets: ["{exporter_addr}"]
+remote_write:
+  - url: http://{receiver_addr}/api/v1/write
+    queue_config:
+      batch_send_deadline: 200ms
+"#
+    );
+    let dir = std::env::temp_dir().join(format!("prom-scrape-e2e-limit-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let config_path = dir.join("prometheus.yml");
+    std::fs::write(&config_path, config_yaml)?;
+
+    let config = Arc::new(config::load(&config_path)?);
+    std::fs::remove_dir_all(&dir).ok();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let request = runtime.block_on(async move {
+        let (handle, _senders) = remote_write::spawn(&config.remote_write)?;
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let _jobs = scrape::spawn_jobs(&config, &handle, &shutdown_rx, false);
+        tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(15)))
+            .await?
+            .map_err(|_| anyhow::anyhow!("no WriteRequest arrived within 15s"))
+    })?;
+
+    let mut found_up = false;
+    for series in &request.timeseries {
+        let name = series
+            .labels
+            .iter()
+            .find(|l| l.name == "__name__")
+            .map_or("", |l| l.value.as_str());
+        assert_ne!(name, "big_metric", "oversized body must not be forwarded");
+        if name == "up" {
+            found_up = true;
+            assert!(
+                series.samples[0].value.abs() < f64::EPSILON,
+                "up must be 0 for a scrape over body_size_limit"
+            );
+        }
+    }
+    assert!(found_up, "up series not found in WriteRequest");
     Ok(())
 }

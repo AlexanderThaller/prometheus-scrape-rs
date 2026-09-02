@@ -145,6 +145,10 @@ pub struct ScrapeConfig {
     pub bearer_token_file: Option<PathBuf>,
     pub tls_config: TlsConfig,
     pub sample_limit: u64,
+    /// Maximum decoded scrape body accepted from a target. `0` disables the
+    /// limit; unlike Prometheus, the default is a cap rather than unlimited,
+    /// so a hostile or broken target cannot push the agent out of memory.
+    pub body_size_limit: PromSize,
     pub static_configs: Vec<StaticConfig>,
     pub file_sd_configs: Vec<FileSdConfig>,
     pub kubernetes_sd_configs: Vec<KubernetesSdConfig>,
@@ -169,6 +173,7 @@ impl Default for ScrapeConfig {
             bearer_token_file: None,
             tls_config: TlsConfig::default(),
             sample_limit: 0,
+            body_size_limit: PromSize::from_bytes(DEFAULT_BODY_SIZE_LIMIT),
             static_configs: Vec::new(),
             file_sd_configs: Vec::new(),
             kubernetes_sd_configs: Vec::new(),
@@ -501,6 +506,179 @@ fn validate_url(url: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Default cap on a decoded scrape body, used when `body_size_limit` is unset.
+///
+/// Well above any real exposition endpoint (the largest observed corpus body
+/// is a few MB) and far below what would exhaust a scraping agent.
+const DEFAULT_BODY_SIZE_LIMIT: u64 = 128 * 1024 * 1024;
+
+/// A Prometheus-style byte size, e.g. `100MB`, `64MiB`, `1.5GiB`, `1048576`,
+/// `0`.
+///
+/// Mirrors the `units.Base2Bytes` syntax Prometheus accepts for
+/// `body_size_limit`: every unit suffix is a power of 1024, so `1KB` and
+/// `1KiB` both mean 1024 bytes; values may be fractional (`1.5MiB`) and
+/// components may be concatenated (`1MiB512KiB`, summed). A bare number is
+/// bytes, and `0` means "no limit".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PromSize(u64);
+
+impl PromSize {
+    #[must_use]
+    pub const fn as_bytes(&self) -> u64 {
+        self.0
+    }
+
+    #[must_use]
+    pub const fn from_bytes(bytes: u64) -> Self {
+        Self(bytes)
+    }
+
+    /// Parse a Prometheus size string.
+    pub fn parse(input: &str) -> Result<Self, PromSizeError> {
+        // The exact token set of Go's `units.ParseBase2Bytes`, which is what
+        // Prometheus parses `body_size_limit` with: `B`, the six IEC
+        // suffixes, and their `B` spellings — all powers of 1024, no
+        // case folding (so `kB` is not a unit).
+        const KI: u64 = 1024;
+        const UNITS: &[(&str, u64)] = &[
+            ("B", 1),
+            ("KB", KI),
+            ("KiB", KI),
+            ("MB", KI.pow(2)),
+            ("MiB", KI.pow(2)),
+            ("GB", KI.pow(3)),
+            ("GiB", KI.pow(3)),
+            ("TB", KI.pow(4)),
+            ("TiB", KI.pow(4)),
+            ("PB", KI.pow(5)),
+            ("PiB", KI.pow(5)),
+            ("EB", KI.pow(6)),
+            ("EiB", KI.pow(6)),
+        ];
+
+        let input = input.trim();
+        if input.is_empty() {
+            return Err(PromSizeError::Empty);
+        }
+        // A bare byte count (`0`, `1048576`) carries no unit component and so
+        // does not go through the loop below.
+        if input.bytes().all(|byte| byte.is_ascii_digit()) {
+            return input
+                .parse()
+                .map(Self)
+                .map_err(|_err| PromSizeError::NumberOverflow(input.to_owned()));
+        }
+
+        // `units.ParseUnit`'s grammar, which is a *sequence* of
+        // `<number><unit>` components: `1.5MiB` and `1MiB512KiB` are both
+        // valid, and components are summed rather than ordered.
+        let mut remaining = input;
+        let mut total: u64 = 0;
+        while !remaining.is_empty() {
+            let whole_len = leading_digits(remaining);
+            let (whole, rest) = remaining.split_at(whole_len);
+            let (fraction, rest) = match rest.strip_prefix('.') {
+                Some(after_point) => after_point.split_at(leading_digits(after_point)),
+                None => ("", rest),
+            };
+            if whole.is_empty() && fraction.is_empty() {
+                return Err(PromSizeError::InvalidFormat(input.to_owned()));
+            }
+
+            // The unit runs to the next digit or decimal point. Non-ASCII
+            // bytes land inside it and simply fail to match a known unit.
+            let unit_len = rest
+                .bytes()
+                .take_while(|byte| !byte.is_ascii_digit() && *byte != b'.')
+                .count();
+            let (unit, next) = rest.split_at(unit_len);
+            let bytes_per_unit = UNITS
+                .iter()
+                .find(|(known, _)| *known == unit)
+                .map(|&(_, bytes)| bytes)
+                .ok_or_else(|| PromSizeError::UnknownUnit(input.to_owned()))?;
+
+            let overflow = || PromSizeError::NumberOverflow(input.to_owned());
+            let mut component = if whole.is_empty() {
+                0
+            } else {
+                whole
+                    .parse::<u64>()
+                    .map_err(|_err| overflow())?
+                    .checked_mul(bytes_per_unit)
+                    .ok_or_else(overflow)?
+            };
+            if !fraction.is_empty() {
+                // Truncating integer maths rather than f64: `units` rounds
+                // its float total down too, and this keeps large units exact.
+                // Digits past the 19th cannot move a `u64` byte count.
+                let digits = &fraction[..fraction.len().min(19)];
+                let scale = 10u128.pow(u32::try_from(digits.len()).unwrap_or(u32::MAX));
+                let numerator = u128::from(digits.parse::<u64>().map_err(|_err| overflow())?)
+                    * u128::from(bytes_per_unit);
+                let part = u64::try_from(numerator / scale).map_err(|_err| overflow())?;
+                component = component.checked_add(part).ok_or_else(overflow)?;
+            }
+            total = total.checked_add(component).ok_or_else(overflow)?;
+            remaining = next;
+        }
+        Ok(Self(total))
+    }
+}
+
+/// Length of the leading run of ASCII digits in `input`.
+fn leading_digits(input: &str) -> usize {
+    input.bytes().take_while(u8::is_ascii_digit).count()
+}
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum PromSizeError {
+    #[error("size string must not be empty")]
+    Empty,
+    #[error("invalid size format: {0:?}")]
+    InvalidFormat(String),
+    #[error("unknown unit in size: {0:?}")]
+    UnknownUnit(String),
+    #[error("size number overflow: {0:?}")]
+    NumberOverflow(String),
+}
+
+impl<'de> Deserialize<'de> for PromSize {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct SizeVisitor;
+
+        impl serde::de::Visitor<'_> for SizeVisitor {
+            type Value = PromSize;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a byte size such as 100MB, 64MiB or a plain byte count")
+            }
+
+            // A bare `body_size_limit: 0` (or any plain count) arrives as an
+            // integer, not a string.
+            fn visit_u64<E: serde::de::Error>(self, value: u64) -> Result<Self::Value, E> {
+                Ok(PromSize(value))
+            }
+
+            fn visit_i64<E: serde::de::Error>(self, value: i64) -> Result<Self::Value, E> {
+                u64::try_from(value)
+                    .map(PromSize)
+                    .map_err(|_err| E::custom(format!("size must not be negative: {value}")))
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                PromSize::parse(value).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(SizeVisitor)
+    }
+}
+
 /// A Prometheus-style duration, e.g. `15s`, `1h30m`, `5m`, `30ms`, `1d`, `1w`,
 /// `1y`, `0`.
 ///
@@ -653,6 +831,71 @@ global:
                 "error should mention agent mode: {err}"
             );
         }
+    }
+
+    #[test]
+    fn parses_body_size_limit() {
+        for (input, want) in [
+            ("0", 0),
+            ("1024", 1024),
+            ("100MB", 100 * 1024 * 1024),
+            ("64MiB", 64 * 1024 * 1024),
+            ("1GB", 1024 * 1024 * 1024),
+            ("512B", 512),
+            ("2TiB", 2 * 1024_u64.pow(4)),
+            ("3PB", 3 * 1024_u64.pow(5)),
+            ("3PiB", 3 * 1024_u64.pow(5)),
+            ("1EB", 1024_u64.pow(6)),
+            ("1EiB", 1024_u64.pow(6)),
+        ] {
+            let yaml = format!("job_name: j\nbody_size_limit: {input}\n");
+            let config: ScrapeConfig = serde_saphyr::from_str(&yaml).expect("must parse");
+            assert_eq!(config.body_size_limit.as_bytes(), want, "input {input:?}");
+        }
+        // `units.ParseBase2Bytes` does not case-fold, so the lowercase
+        // spellings are not units; `20EB` overflows u64.
+        for input in ["MB", "1kB", "1kiB", "1mb", "20EB", "-1", "10 20"] {
+            let yaml = format!("job_name: j\nbody_size_limit: \"{input}\"\n");
+            serde_saphyr::from_str::<ScrapeConfig>(&yaml)
+                .expect_err(&format!("{input:?} must be rejected"));
+        }
+    }
+
+    #[test]
+    fn parses_fractional_and_concatenated_sizes() {
+        // The `units.ParseUnit` grammar: [0-9]*(\.[0-9]*)?<unit>, repeated.
+        for (input, want) in [
+            ("1.5MiB", 1024 * 1024 + 512 * 1024),
+            ("0.5GiB", 512 * 1024 * 1024),
+            (".5MiB", 512 * 1024),
+            ("1.MiB", 1024 * 1024),
+            ("1MiB512KiB", 1024 * 1024 + 512 * 1024),
+            ("1GB512MB1KB", 1024 * 1024 * 1024 + 512 * 1024 * 1024 + 1024),
+            // Components are summed, not required to descend.
+            ("512KiB1MiB", 1024 * 1024 + 512 * 1024),
+            // A fraction that does not divide evenly truncates.
+            ("1.1KiB", 1126),
+        ] {
+            assert_eq!(
+                PromSize::parse(input).expect("must parse").as_bytes(),
+                want,
+                "input {input:?}"
+            );
+        }
+        // A component without a unit is not part of the grammar.
+        for input in ["1MiB512", ".MiB", "1.5", "1.5.5MiB"] {
+            PromSize::parse(input).expect_err(&format!("{input:?} must be rejected"));
+        }
+    }
+
+    #[test]
+    fn body_size_limit_defaults_to_a_cap() {
+        let config: ScrapeConfig = serde_saphyr::from_str("job_name: j\n").expect("must parse");
+        assert_eq!(
+            config.body_size_limit.as_bytes(),
+            DEFAULT_BODY_SIZE_LIMIT,
+            "an unset body_size_limit must still bound the response"
+        );
     }
 
     #[test]
