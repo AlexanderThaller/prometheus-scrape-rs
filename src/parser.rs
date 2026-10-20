@@ -24,7 +24,7 @@ use crate::model::{
 ///
 /// No legitimate exposition line comes close; the cap keeps a hostile target
 /// from making one line cost arbitrarily much time and memory.
-const MAX_LABELS_PER_SERIES: usize = 128;
+pub(crate) const MAX_LABELS_PER_SERIES: usize = 128;
 
 /// Label count up to which duplicate names are detected with a linear scan
 /// over the labels parsed so far.
@@ -313,6 +313,7 @@ fn parse_line(
         labels,
         sample: Sample { value, timestamp },
         identity_hash,
+        histogram: None,
     }))
 }
 

@@ -1,7 +1,8 @@
 # prometheus-scrape-rs
 
 A lightweight Prometheus scraping agent in Rust: scrapes Prometheus
-exposition endpoints and forwards all samples to durable remote storage via
+exposition endpoints (text format, or protobuf for native histograms) and
+forwards all samples to durable remote storage via
 the [remote-write 1.0 protocol](https://prometheus.io/docs/specs/prw/remote_write_spec/).
 It reads a standard `prometheus.yml` and aims to be a cheap drop-in
 replacement for Prometheus in agent mode.
@@ -34,10 +35,14 @@ accepted and ignored (hidden from `--help`).
 
 The agent-mode subset of the Prometheus configuration format:
 
-- `global`: `scrape_interval`, `scrape_timeout`, `external_labels`
+- `global`: `scrape_interval`, `scrape_timeout`, `external_labels`,
+  `scrape_protocols`, `scrape_native_histograms`,
+  `always_scrape_classic_histograms`
 - `scrape_configs`: `job_name`, `metrics_path`, `scheme`, `params`,
   `scrape_interval`/`scrape_timeout` overrides, `honor_labels`,
-  `honor_timestamps`, `sample_limit`, `body_size_limit`, `basic_auth`, `authorization`,
+  `honor_timestamps`, `sample_limit`, `body_size_limit`, `scrape_protocols`,
+  `scrape_native_histograms`, `always_scrape_classic_histograms`,
+  `native_histogram_bucket_limit`, `basic_auth`, `authorization`,
   `bearer_token(_file)`, `tls_config` (`insecure_skip_verify`, `ca_file`),
   `static_configs`, `file_sd_configs`, `kubernetes_sd_configs`,
   `relabel_configs`, `metric_relabel_configs`
@@ -53,6 +58,43 @@ caps the decoded response a target may return; the body is streamed and the
 scrape fails once the cap is passed. Unlike Prometheus, which defaults to no
 limit, the default here is 128MiB, so a compromised or broken target cannot
 push the agent out of memory.
+
+### Native histograms and protobuf scraping
+
+Native histograms are only exposed in the protobuf exposition format
+(`application/vnd.google.protobuf;
+proto=io.prometheus.client.MetricFamily; encoding=delimited`). Enable them
+with `scrape_native_histograms: true`, globally or per job:
+
+```yaml
+global:
+  scrape_native_histograms: true
+```
+
+The agent then offers protobuf first in the `Accept` header (falling back to
+text for targets that do not speak it) and forwards native histograms as
+remote-write histogram samples, over both remote-write 1.0 and 2.0. As in
+Prometheus:
+
+- A histogram with native buckets becomes one native histogram series; with
+  `always_scrape_classic_histograms: true` its classic `_bucket`/`_sum`/
+  `_count` series are kept as well. Histograms without native buckets
+  (classic-only) are always ingested as classic series.
+- With native histograms off, protobuf bodies are still parsed and every
+  histogram is converted to its classic series.
+- Schemas finer than 8 are reduced to 8. `native_histogram_bucket_limit`
+  (default `0`, unlimited) reduces resolution further until a histogram
+  fits, and fails the scrape if it cannot. `native_histogram_min_bucket_factor`
+  is not supported.
+- Staleness markers for vanished native histograms are float stale-NaN
+  samples, as in Prometheus.
+
+`scrape_protocols` accepts `PrometheusProto` and `PrometheusText0.0.4`. The
+newer text formats (`PrometheusText1.0.0`, `OpenMetricsText*`) are
+rejected at startup: the text parser speaks 0.0.4, so it must not offer
+formats it would mis-parse. The response's `Content-Type` decides which
+parser runs; a missing or unknown type is parsed as text, as before. There
+is no `fallback_scrape_protocol`.
 
 Relabeling implements the full Prometheus action set: `replace`, `keep`,
 `drop`, `keepequal`, `dropequal`, `hashmod` (MD5, bit-compatible with
@@ -92,13 +134,17 @@ ships for Prometheus itself.
 
 ## Design notes
 
-- **Wire format without middlemen**: the four remote-write protobuf messages
-  are hand-written `prost` structs (`src/model.rs`); the exposition parser
-  emits them directly, so a sample goes scrape body → `TimeSeries` → snappy
+- **Wire format without middlemen**: the remote-write protobuf messages are
+  hand-written `prost` structs with hand-rolled encoders (`src/model.rs`);
+  the exposition parsers emit series directly, so a sample goes scrape body → `TimeSeries` → snappy
   compressed `WriteRequest` with no intermediate metric model.
 - **Parser** (`src/parser.rs`): single-pass, byte-level, regex-free parser
   for the text exposition format 0.0.4 with pragmatic OpenMetrics tolerance
   (`# EOF`, exemplars ignored, float-second timestamps converted).
+- **Protobuf parser** (`src/protobuf.rs`): decodes delimited
+  `MetricFamily` messages with `prost` and converts them like Prometheus'
+  protobuf parser (summaries and classic histograms expanded, native
+  histograms validated and passed through).
 - **Scraping** (`src/scrape.rs`): one tokio task per target with a
   deterministic FNV-1a jitter offset spreading scrapes over the interval.
 - **Sending** (`src/remote_write.rs`): per-endpoint batching queues honoring

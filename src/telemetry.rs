@@ -247,6 +247,7 @@ impl Metrics {
                     labels,
                     sample: Sample { value, timestamp },
                     identity_hash: 0,
+                    histogram: None,
                 }
             })
             .collect();

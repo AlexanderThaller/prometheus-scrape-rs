@@ -20,6 +20,8 @@ use prometheus_scrape_rs::{
     model::{
         Label,
         Sample,
+        WireCount,
+        WireHistogram,
     },
     remote_write,
     scrape,
@@ -35,6 +37,8 @@ struct WireTimeSeries {
     labels: Vec<Label>,
     #[prost(message, repeated, tag = "2")]
     samples: Vec<Sample>,
+    #[prost(message, repeated, tag = "4")]
+    histograms: Vec<WireHistogram>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -509,5 +513,166 @@ remote_write:
         }
     }
     assert!(found_up, "up series not found in WriteRequest");
+    Ok(())
+}
+
+/// Serve `body` as a delimited protobuf exposition, but only to scrapes
+/// whose `Accept` header offers it — like an exporter honoring content
+/// negotiation — and plain text otherwise.
+fn serve_protobuf_scrapes(listener: &TcpListener, body: &[u8]) {
+    for stream in listener.incoming() {
+        let Ok(mut stream) = stream else { continue };
+        let mut buf = [0u8; 4096];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let request = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+        let offers_protobuf = request.lines().any(|line| {
+            line.starts_with("accept:")
+                && line.contains("application/vnd.google.protobuf")
+                && line.contains("encoding=delimited")
+        });
+        if offers_protobuf {
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/vnd.google.protobuf; \
+                 proto=io.prometheus.client.MetricFamily; encoding=delimited\r\ncontent-length: \
+                 {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(head.as_bytes());
+            let _ = stream.write_all(body);
+        } else {
+            let text = "text_fallback 1\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/plain; version=0.0.4\r\ncontent-length: \
+                 {}\r\nconnection: close\r\n\r\n{text}",
+                text.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+        }
+    }
+}
+
+/// A delimited protobuf body holding one integer native histogram: schema 3,
+/// one zero-bucket observation and two positive buckets.
+fn native_histogram_body() -> Vec<u8> {
+    use prometheus_scrape_rs::protobuf::dto;
+
+    let family = dto::MetricFamily {
+        name: Some("request_duration_seconds".to_owned()),
+        r#type: Some(dto::MetricType::Histogram as i32),
+        metric: vec![dto::Metric {
+            label: vec![dto::LabelPair {
+                name: Some("path".to_owned()),
+                value: Some("/api".to_owned()),
+            }],
+            histogram: Some(dto::Histogram {
+                sample_count: Some(3),
+                sample_sum: Some(2.5),
+                schema: Some(3),
+                zero_threshold: Some(1e-128),
+                zero_count: Some(1),
+                positive_span: vec![dto::BucketSpan {
+                    offset: Some(-2),
+                    length: Some(2),
+                }],
+                positive_delta: vec![1, 0],
+                ..dto::Histogram::default()
+            }),
+            ..dto::Metric::default()
+        }],
+    };
+    family.encode_length_delimited_to_vec()
+}
+
+#[test]
+fn native_histograms_scraped_via_protobuf_arrive_via_remote_write() -> anyhow::Result<()> {
+    let body = native_histogram_body();
+
+    let exporter = TcpListener::bind("127.0.0.1:0")?;
+    let exporter_addr = exporter.local_addr()?;
+    std::thread::spawn(move || serve_protobuf_scrapes(&exporter, &body));
+
+    let receiver = TcpListener::bind("127.0.0.1:0")?;
+    let receiver_addr = receiver.local_addr()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || serve_remote_write(&receiver, &tx));
+
+    let config_yaml = format!(
+        r#"
+global:
+  scrape_interval: 1s
+  scrape_native_histograms: true
+scrape_configs:
+  - job_name: native
+    static_configs:
+      - targets: ["{exporter_addr}"]
+remote_write:
+  - url: http://{receiver_addr}/api/v1/write
+    queue_config:
+      batch_send_deadline: 200ms
+"#
+    );
+    let dir = std::env::temp_dir().join(format!("prom-scrape-e2e-native-{}", std::process::id()));
+    std::fs::create_dir_all(&dir)?;
+    let config_path = dir.join("prometheus.yml");
+    std::fs::write(&config_path, config_yaml)?;
+    let config = Arc::new(config::load(&config_path)?);
+    std::fs::remove_dir_all(&dir).ok();
+
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let request = runtime.block_on(async move {
+        let (handle, _senders) = remote_write::spawn(&config.remote_write)?;
+        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let _jobs = scrape::spawn_jobs(&config, &handle, &shutdown_rx, false);
+        tokio::task::spawn_blocking(move || rx.recv_timeout(Duration::from_secs(15)))
+            .await?
+            .map_err(|_| anyhow::anyhow!("no WriteRequest arrived within 15s"))
+    })?;
+
+    let name_of = |series: &WireTimeSeries| {
+        series
+            .labels
+            .iter()
+            .find(|l| l.name == "__name__")
+            .map_or(String::new(), |l| l.value.to_string())
+    };
+    let names: Vec<String> = request.timeseries.iter().map(name_of).collect();
+    assert!(
+        !names.iter().any(|name| name == "text_fallback"),
+        "protobuf must have been negotiated: {names:?}"
+    );
+    let series = request
+        .timeseries
+        .iter()
+        .find(|series| name_of(series) == "request_duration_seconds")
+        .ok_or_else(|| anyhow::anyhow!("native histogram series missing: {names:?}"))?;
+    assert_eq!(
+        series.samples,
+        Vec::<Sample>::new(),
+        "histogram series carries no float sample"
+    );
+    assert!(
+        series
+            .labels
+            .iter()
+            .any(|l| l.name == "path" && l.value == "/api")
+    );
+    assert!(
+        series
+            .labels
+            .iter()
+            .any(|l| l.name == "job" && l.value == "native")
+    );
+    let [histogram] = series.histograms.as_slice() else {
+        anyhow::bail!("expected exactly one histogram: {:?}", series.histograms);
+    };
+    assert_eq!(histogram.count, Some(WireCount::CountInt(3)));
+    assert_eq!(histogram.schema, 3);
+    assert!((histogram.sum - 2.5).abs() < f64::EPSILON);
+    assert_eq!(histogram.positive_spans.len(), 1);
+    assert_eq!(histogram.positive_spans[0].offset, -2);
+    assert_eq!(histogram.positive_deltas, [1, 0]);
+    assert!(histogram.timestamp > 1_700_000_000_000);
     Ok(())
 }

@@ -87,6 +87,7 @@ impl Config {
                 );
             }
         }
+        self.global.validate()?;
         let mut seen_job_names = std::collections::HashSet::new();
         for scrape_config in &self.scrape_configs {
             scrape_config.validate()?;
@@ -110,6 +111,16 @@ pub struct GlobalConfig {
     pub scrape_interval: PromDuration,
     pub scrape_timeout: PromDuration,
     pub external_labels: BTreeMap<String, String>,
+    /// Exposition formats offered to targets, most preferred first. `None`
+    /// picks the default for the job's native-histogram setting (see
+    /// [`ScrapeConfig::protocols`]).
+    pub scrape_protocols: Option<Vec<ScrapeProtocol>>,
+    /// Ingest native histograms (protobuf exposition only). Off by default,
+    /// like Prometheus.
+    pub scrape_native_histograms: bool,
+    /// Also ingest the classic `_bucket`/`_sum`/`_count` series of
+    /// histograms that are ingested as native histograms.
+    pub always_scrape_classic_histograms: bool,
     // Accepted but unused, like Prometheus agent mode: rule evaluation and
     // query logging do not exist in a scraping agent.
     evaluation_interval: Option<PromDuration>,
@@ -122,9 +133,87 @@ impl Default for GlobalConfig {
             scrape_interval: PromDuration::from_secs(60),
             scrape_timeout: PromDuration::from_secs(10),
             external_labels: BTreeMap::new(),
+            scrape_protocols: None,
+            scrape_native_histograms: false,
+            always_scrape_classic_histograms: false,
             evaluation_interval: None,
             query_log_file: None,
         }
+    }
+}
+
+/// An exposition format a target may be asked for (`scrape_protocols`),
+/// spelled as in the Prometheus configuration.
+///
+/// All Prometheus values parse, so a config written for Prometheus gets a
+/// precise error instead of a generic one; validation then admits only the
+/// formats this agent's parsers handle (see [`ScrapeProtocol::is_supported`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub enum ScrapeProtocol {
+    /// Length-delimited `io.prometheus.client.MetricFamily` protobuf
+    /// messages — the only format carrying native histograms.
+    PrometheusProto,
+    #[serde(rename = "PrometheusText0.0.4")]
+    PrometheusText0_0_4,
+    #[serde(rename = "PrometheusText1.0.0")]
+    PrometheusText1_0_0,
+    #[serde(rename = "OpenMetricsText0.0.1")]
+    OpenMetricsText0_0_1,
+    #[serde(rename = "OpenMetricsText1.0.0")]
+    OpenMetricsText1_0_0,
+}
+
+impl ScrapeProtocol {
+    /// The media type offered in the `Accept` header (Prometheus'
+    /// `ScrapeProtocolsHeaders`).
+    #[must_use]
+    pub fn media_type(self) -> &'static str {
+        match self {
+            Self::PrometheusProto => {
+                "application/vnd.google.protobuf;proto=io.prometheus.client.MetricFamily;\
+                 encoding=delimited"
+            }
+            Self::PrometheusText0_0_4 => "text/plain;version=0.0.4",
+            Self::PrometheusText1_0_0 => "text/plain;version=1.0.0",
+            Self::OpenMetricsText0_0_1 => "application/openmetrics-text;version=0.0.1",
+            Self::OpenMetricsText1_0_0 => "application/openmetrics-text;version=1.0.0",
+        }
+    }
+
+    /// Whether this agent can parse the format. The text parser speaks
+    /// 0.0.4; the newer text formats (UTF-8 names, `OpenMetrics` `_created`
+    /// semantics) would be accepted from targets and then mis-parsed, so
+    /// they are refused at config load instead.
+    #[must_use]
+    pub fn is_supported(self) -> bool {
+        matches!(self, Self::PrometheusProto | Self::PrometheusText0_0_4)
+    }
+}
+
+fn validate_scrape_protocols(protocols: &[ScrapeProtocol]) -> Result<(), String> {
+    if protocols.is_empty() {
+        return Err("scrape_protocols must not be empty".to_owned());
+    }
+    for (i, protocol) in protocols.iter().enumerate() {
+        if !protocol.is_supported() {
+            return Err(format!(
+                "scrape_protocols: {protocol:?} is not supported (supported: PrometheusProto, \
+                 PrometheusText0.0.4)"
+            ));
+        }
+        if protocols[..i].contains(protocol) {
+            return Err(format!("scrape_protocols: duplicate {protocol:?}"));
+        }
+    }
+    Ok(())
+}
+
+impl GlobalConfig {
+    fn validate(&self) -> anyhow::Result<()> {
+        if let Some(protocols) = &self.scrape_protocols {
+            validate_scrape_protocols(protocols).map_err(|err| anyhow::anyhow!("global: {err}"))?;
+        }
+        Ok(())
     }
 }
 
@@ -149,6 +238,14 @@ pub struct ScrapeConfig {
     /// limit; unlike Prometheus, the default is a cap rather than unlimited,
     /// so a hostile or broken target cannot push the agent out of memory.
     pub body_size_limit: PromSize,
+    /// Per-job overrides of the [`GlobalConfig`] settings of the same name.
+    pub scrape_protocols: Option<Vec<ScrapeProtocol>>,
+    pub scrape_native_histograms: Option<bool>,
+    pub always_scrape_classic_histograms: Option<bool>,
+    /// Maximum buckets of a native histogram; larger ones are reduced in
+    /// resolution until they fit, and fail the scrape if they cannot. `0`
+    /// disables the limit.
+    pub native_histogram_bucket_limit: u32,
     pub static_configs: Vec<StaticConfig>,
     pub file_sd_configs: Vec<FileSdConfig>,
     pub kubernetes_sd_configs: Vec<KubernetesSdConfig>,
@@ -174,6 +271,10 @@ impl Default for ScrapeConfig {
             tls_config: TlsConfig::default(),
             sample_limit: 0,
             body_size_limit: PromSize::from_bytes(DEFAULT_BODY_SIZE_LIMIT),
+            scrape_protocols: None,
+            scrape_native_histograms: None,
+            always_scrape_classic_histograms: None,
+            native_histogram_bucket_limit: 0,
             static_configs: Vec::new(),
             file_sd_configs: Vec::new(),
             kubernetes_sd_configs: Vec::new(),
@@ -201,9 +302,52 @@ impl ScrapeConfig {
             .as_duration()
     }
 
+    /// Whether native histograms are ingested, falling back to the global
+    /// setting when unset.
+    #[must_use]
+    pub fn native_histograms(&self, global: &GlobalConfig) -> bool {
+        self.scrape_native_histograms
+            .unwrap_or(global.scrape_native_histograms)
+    }
+
+    /// Whether classic series are also kept for native histograms, falling
+    /// back to the global setting when unset.
+    #[must_use]
+    pub fn classic_histograms(&self, global: &GlobalConfig) -> bool {
+        self.always_scrape_classic_histograms
+            .unwrap_or(global.always_scrape_classic_histograms)
+    }
+
+    /// Effective exposition formats, most preferred first: the job's list,
+    /// else the global one, else — like Prometheus — protobuf first when
+    /// native histograms are on (only protobuf carries them) and text only
+    /// otherwise.
+    #[must_use]
+    pub fn protocols(&self, global: &GlobalConfig) -> Vec<ScrapeProtocol> {
+        if let Some(protocols) = self
+            .scrape_protocols
+            .as_ref()
+            .or(global.scrape_protocols.as_ref())
+        {
+            return protocols.clone();
+        }
+        if self.native_histograms(global) {
+            vec![
+                ScrapeProtocol::PrometheusProto,
+                ScrapeProtocol::PrometheusText0_0_4,
+            ]
+        } else {
+            vec![ScrapeProtocol::PrometheusText0_0_4]
+        }
+    }
+
     fn validate(&self) -> anyhow::Result<()> {
         if self.job_name.is_empty() {
             anyhow::bail!("job_name must not be empty");
+        }
+        if let Some(protocols) = &self.scrape_protocols {
+            validate_scrape_protocols(protocols)
+                .map_err(|err| anyhow::anyhow!("scrape config {:?}: {err}", self.job_name))?;
         }
         if self.scheme != "http" && self.scheme != "https" {
             anyhow::bail!(
@@ -1354,5 +1498,96 @@ remote_write:
         let config: Config = serde_saphyr::from_str(yaml).unwrap();
         let err = config.validate().unwrap_err();
         assert!(err.to_string().contains("max_samples_per_send"), "{err}");
+    }
+
+    #[test]
+    fn native_histogram_settings_fall_back_to_global() {
+        let yaml = r"
+global:
+  scrape_native_histograms: true
+  always_scrape_classic_histograms: true
+scrape_configs:
+  - job_name: inherits
+  - job_name: overrides
+    scrape_native_histograms: false
+    always_scrape_classic_histograms: false
+    native_histogram_bucket_limit: 160
+  - job_name: explicit
+    scrape_protocols: [PrometheusText0.0.4, PrometheusProto]
+";
+        let config: Config = serde_saphyr::from_str(yaml).expect("must parse");
+        config.validate().expect("must validate");
+        let global = &config.global;
+        let [inherits, overrides, explicit] = config.scrape_configs.as_slice() else {
+            panic!("three jobs");
+        };
+
+        assert!(inherits.native_histograms(global));
+        assert!(inherits.classic_histograms(global));
+        assert_eq!(
+            inherits.protocols(global),
+            [
+                ScrapeProtocol::PrometheusProto,
+                ScrapeProtocol::PrometheusText0_0_4
+            ],
+            "native histograms put protobuf first by default"
+        );
+
+        assert!(!overrides.native_histograms(global));
+        assert!(!overrides.classic_histograms(global));
+        assert_eq!(overrides.native_histogram_bucket_limit, 160);
+        assert_eq!(
+            overrides.protocols(global),
+            [ScrapeProtocol::PrometheusText0_0_4]
+        );
+
+        assert_eq!(
+            explicit.protocols(global),
+            [
+                ScrapeProtocol::PrometheusText0_0_4,
+                ScrapeProtocol::PrometheusProto
+            ]
+        );
+    }
+
+    #[test]
+    fn defaults_scrape_text_only() {
+        let config: Config =
+            serde_saphyr::from_str("scrape_configs:\n  - job_name: a\n").expect("must parse");
+        let job = &config.scrape_configs[0];
+        assert!(!job.native_histograms(&config.global));
+        assert_eq!(
+            job.protocols(&config.global),
+            [ScrapeProtocol::PrometheusText0_0_4]
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_scrape_protocols() {
+        for (yaml, expected) in [
+            (
+                "global:\n  scrape_protocols: [OpenMetricsText1.0.0]\n",
+                "not supported",
+            ),
+            (
+                "scrape_configs:\n  - job_name: a\n    scrape_protocols: [PrometheusText1.0.0]\n",
+                "not supported",
+            ),
+            (
+                "scrape_configs:\n  - job_name: a\n    scrape_protocols: []\n",
+                "must not be empty",
+            ),
+            (
+                "global:\n  scrape_protocols: [PrometheusProto, PrometheusProto]\n",
+                "duplicate",
+            ),
+        ] {
+            let config: Config = serde_saphyr::from_str(yaml).expect("must parse");
+            let err = config.validate().expect_err(expected).to_string();
+            assert!(err.contains(expected), "{err} vs {expected}");
+        }
+        assert!(
+            serde_saphyr::from_str::<Config>("global:\n  scrape_protocols: [Bogus]\n").is_err()
+        );
     }
 }
