@@ -505,6 +505,9 @@ pub struct RemoteWriteConfig {
     /// or the 2.0 `io.prometheus.write.v2.Request` with its symbol table.
     /// Field name and values match the Prometheus configuration.
     pub protobuf_message: ProtobufMessage,
+    /// Whether native histogram samples are sent. Off by default, as in
+    /// Prometheus: an endpoint without it drops them before queueing.
+    pub send_native_histograms: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -530,6 +533,7 @@ impl Default for RemoteWriteConfig {
             write_relabel_configs: Vec::new(),
             queue_config: QueueConfig::default(),
             protobuf_message: ProtobufMessage::default(),
+            send_native_histograms: false,
         }
     }
 }
@@ -1461,6 +1465,20 @@ scrape_configs:
                 .contains("at most one of basic_auth, authorization, or bearer_token"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn send_native_histograms_defaults_off() {
+        let yaml = r"
+remote_write:
+  - url: http://100.64.0.1:9009/api/v1/push
+    send_native_histograms: true
+  - url: http://localhost:9090/write
+";
+        let config: Config = serde_saphyr::from_str(yaml).unwrap();
+        config.validate().unwrap();
+        assert!(config.remote_write[0].send_native_histograms);
+        assert!(!config.remote_write[1].send_native_histograms);
     }
 
     #[test]

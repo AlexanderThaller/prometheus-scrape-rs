@@ -607,6 +607,7 @@ scrape_configs:
       - targets: ["{exporter_addr}"]
 remote_write:
   - url: http://{receiver_addr}/api/v1/write
+    send_native_histograms: true
     queue_config:
       batch_send_deadline: 200ms
 "#

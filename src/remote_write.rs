@@ -135,6 +135,7 @@ struct Endpoint {
     name: String,
     url: String,
     protocol: ProtobufMessage,
+    send_native_histograms: bool,
     client: reqwest::Client,
     credentials: Credentials,
     extra_headers: Vec<(String, String)>,
@@ -183,6 +184,7 @@ impl Endpoint {
             name,
             url: config.url.clone(),
             protocol: config.protobuf_message,
+            send_native_histograms: config.send_native_histograms,
             client,
             credentials,
             extra_headers,
@@ -208,7 +210,10 @@ impl Endpoint {
         loop {
             tokio::select! {
                 received = rx.recv() => match received {
-                    Some(batch) => {
+                    Some(mut batch) => {
+                        if !self.send_native_histograms {
+                            drop_native_histograms(&mut batch);
+                        }
                         pending_samples += batch.len();
                         pending.extend(batch);
                         while pending_samples >= self.max_samples_per_send {
@@ -554,6 +559,13 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
     }
 }
 
+/// Remove native histogram samples, as Prometheus does for an endpoint
+/// without `send_native_histograms`. Stale markers of histogram series are
+/// float samples and stay.
+fn drop_native_histograms(batch: &mut Vec<TimeSeries>) {
+    batch.retain(|series| series.histogram.is_none());
+}
+
 /// Split off up to `max_samples` worth of leading series from `pending`.
 /// Returns the chunk and the number of samples it holds (one per series).
 fn split_batch(pending: &mut Vec<TimeSeries>, max_samples: usize) -> (Vec<TimeSeries>, usize) {
@@ -735,6 +747,17 @@ mod tests {
             identity_hash: 0,
             histogram: None,
         }
+    }
+
+    #[test]
+    fn drop_native_histograms_keeps_float_samples() {
+        let histogram = TimeSeries {
+            histogram: Some(Box::default()),
+            ..series("h", 1)
+        };
+        let mut batch = vec![series("a", 1), histogram, series("b", 1)];
+        drop_native_histograms(&mut batch);
+        assert_eq!(batch, vec![series("a", 1), series("b", 1)]);
     }
 
     #[test]

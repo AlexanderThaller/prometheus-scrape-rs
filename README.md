@@ -51,7 +51,8 @@ The agent-mode subset of the Prometheus configuration format:
   `max_samples_per_send`, `batch_send_deadline`, `min_backoff`,
   `max_backoff`), `protobuf_message` (`prometheus.WriteRequest` default,
   or `io.prometheus.write.v2.Request` for remote-write 2.0 with its
-  symbol table — ~40-60% smaller payloads, supported by Mimir >= 2.17)
+  symbol table — ~40-60% smaller payloads, supported by Mimir >= 2.17),
+  `send_native_histograms` (default `false`)
 
 `body_size_limit` (`100MB`, `64MiB`, a plain byte count, or `0` to disable)
 caps the decoded response a target may return; the body is streamed and the
@@ -63,18 +64,25 @@ push the agent out of memory.
 
 Native histograms are only exposed in the protobuf exposition format
 (`application/vnd.google.protobuf;
-proto=io.prometheus.client.MetricFamily; encoding=delimited`). Enable them
-with `scrape_native_histograms: true`, globally or per job:
+proto=io.prometheus.client.MetricFamily; encoding=delimited`). Scrape them with
+`scrape_native_histograms: true`, globally or per job, and send them with
+`send_native_histograms: true` on each `remote_write` endpoint that should
+receive them:
 
 ```yaml
 global:
   scrape_native_histograms: true
+remote_write:
+  - url: http://mimir:9009/api/v1/push
+    send_native_histograms: true
 ```
 
 The agent then offers protobuf first in the `Accept` header (falling back to
 text for targets that do not speak it) and forwards native histograms as
-remote-write histogram samples, over both remote-write 1.0 and 2.0. As in
-Prometheus:
+remote-write histogram samples, over both remote-write 1.0 and 2.0, to every
+`remote_write` endpoint with `send_native_histograms: true`. As in
+Prometheus, that setting defaults to `false` and an endpoint without it
+drops native histograms; set both to ship them. Also as in Prometheus:
 
 - A histogram with native buckets becomes one native histogram series; with
   `always_scrape_classic_histograms: true` its classic `_bucket`/`_sum`/
