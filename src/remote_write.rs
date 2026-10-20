@@ -678,7 +678,7 @@ mod tests {
         let (chunk, samples) = split_batch(&mut pending, 100);
         assert_eq!(chunk.len(), 2);
         assert_eq!(samples, 2);
-        assert!(pending.is_empty());
+        assert_eq!(pending, Vec::<TimeSeries>::new());
     }
 
     #[test]

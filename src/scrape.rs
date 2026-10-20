@@ -992,10 +992,9 @@ mod tests {
         let body1 = "metric_a{case=\"x\"} 1\nmetric_b 2\nexplicit 3 500\n";
         let ts1 = 1_000;
         let batch1 = simulate_scrape(&target, body1, ts1);
-        assert!(
-            tracker
-                .advance(&target, &batch1, Some(retained(body1)), ts1)
-                .is_empty()
+        assert_eq!(
+            tracker.advance(&target, &batch1, Some(retained(body1)), ts1),
+            Vec::<TimeSeries>::new()
         );
         assert_eq!(tracker.hashes.len(), 2);
 
@@ -1023,23 +1022,22 @@ mod tests {
         assert_eq!(markers.len(), 1);
         assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_a");
         assert_eq!(get_label(&markers[0].labels, "case"), "x");
-        assert!(tracker.hashes.is_empty());
+        assert_eq!(tracker.hashes, Vec::<u64>::new());
         assert!(tracker.retained.is_none());
 
         // Recovery: series returns, no markers.
         let ts4 = 4_000;
         let batch4 = simulate_scrape(&target, body2, ts4);
-        assert!(
-            tracker
-                .advance(&target, &batch4, Some(retained(body2)), ts4)
-                .is_empty()
+        assert_eq!(
+            tracker.advance(&target, &batch4, Some(retained(body2)), ts4),
+            Vec::<TimeSeries>::new()
         );
 
         // Target removal drains everything tracked.
         let markers = tracker.drain_all(&target, 5_000);
         assert_eq!(markers.len(), 1);
         assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_a");
-        assert!(tracker.hashes.is_empty());
+        assert_eq!(tracker.hashes, Vec::<u64>::new());
         assert!(tracker.retained.is_none());
     }
 
@@ -1057,10 +1055,9 @@ mod tests {
             (3_000, "metric_a 9\nmetric_b 10\n"),
         ] {
             let batch = simulate_scrape(&target, body, timestamp);
-            assert!(
-                tracker
-                    .advance(&target, &batch, Some(retained(body)), timestamp)
-                    .is_empty()
+            assert_eq!(
+                tracker.advance(&target, &batch, Some(retained(body)), timestamp),
+                Vec::<TimeSeries>::new()
             );
         }
         let retained_scrape = tracker.retained.as_ref().expect("body retained");

@@ -309,7 +309,7 @@ mod tests {
     fn series_snapshot_is_sorted_and_labeled() {
         let extra = [Label::new("job", "self"), Label::new("instance", "here")];
         let series = METRICS.series(&extra, 5_000);
-        assert!(!series.is_empty());
+        assert_ne!(series, Vec::<TimeSeries>::new());
         for s in &series {
             assert!(s.labels.windows(2).all(|w| w[0].name < w[1].name));
             assert!(

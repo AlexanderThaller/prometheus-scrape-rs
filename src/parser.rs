@@ -848,11 +848,17 @@ rpc_duration_seconds_count 2693
 
     #[test]
     fn empty_and_comment_only_bodies() -> Result<(), ParseError> {
-        assert!(parse("", TS, true)?.is_empty());
-        assert!(parse("   \n\t\n  \n", TS, true)?.is_empty());
-        assert!(parse("# HELP x\n# TYPE x counter\n", TS, true)?.is_empty());
+        assert_eq!(parse("", TS, true)?, Vec::<TimeSeries>::new());
+        assert_eq!(parse("   \n\t\n  \n", TS, true)?, Vec::<TimeSeries>::new());
+        assert_eq!(
+            parse("# HELP x\n# TYPE x counter\n", TS, true)?,
+            Vec::<TimeSeries>::new()
+        );
         // Indented comment.
-        assert!(parse("   # a comment\n", TS, true)?.is_empty());
+        assert_eq!(
+            parse("   # a comment\n", TS, true)?,
+            Vec::<TimeSeries>::new()
+        );
         Ok(())
     }
 
