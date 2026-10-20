@@ -10,39 +10,62 @@ clap = { version = "4", features = ["derive"] }
 futures = { version = "0.3", default-features = false, features = ["std"] }
 glob = "0.3"
 k8s-openapi = { version = "0.28", features = ["latest"] }
-kube = { version = "4", default-features = false, features = ["client", "runtime", "rustls-tls"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }
+kube = { version = "4", default-features = false, features = [
+  "client",
+  "runtime",
+  "rustls-tls",
+] }
+rustls = { version = "0.23", default-features = false, features = [
+  "ring",
+  "std",
+  "logging",
+  "tls12",
+] }
 md-5 = "0.11"
 mimalloc = "0.1"
 prost = "0.14"
 regex = "1"
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "gzip", "http2", "query", "hickory-dns"] }
+reqwest = { version = "0.13", default-features = false, features = [
+  "rustls-no-provider",
+  "gzip",
+  "http2",
+  "query",
+  "hickory-dns",
+] }
 serde = { version = "1", features = ["derive"] }
-serde-saphyr = "0.0.29"
+serde-saphyr = "2"
 snap = "1"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync", "fs"] }
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "net",
+  "time",
+  "signal",
+  "sync",
+  "fs",
+] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 memchr = "2"
-compact_str = "0.9"
+compact_str = "0.10"
 
 [lints.rust]
-#missing-docs = "warn"
-missing-debug-implementations = "warn"
-rust-2018-idioms = "warn"
-unsafe-code = "forbid"
-unused-lifetimes = "warn"
+#missing_docs = "warn"
+missing_debug_implementations = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unsafe_code = "forbid"
+unused_lifetimes = "warn"
 
 [lints.clippy]
-allow-attributes = "warn"
-allow-attributes-without-reason = "warn"
-dbg-macro = "warn"
+allow_attributes = "warn"
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
 pedantic = { level = "warn", priority = -1 }
 todo = "warn"
-unwrap-used = "warn"
-missing-panics-doc = "allow"
-missing-errors-doc = "allow"
+unwrap_used = "warn"
+missing_panics_doc = "allow"
+missing_errors_doc = "allow"
 
 [profile.deploy]
 inherits = "release"
