@@ -171,6 +171,14 @@ fn is_name_continue(b: u8, allow_colon: bool) -> bool {
     class & NAME_CONTINUE != 0 || (allow_colon && class & NAME_COLON != 0)
 }
 
+/// Whether `name` is a metric name (`allow_colon`) or label name the text
+/// format accepts, so other exposition formats apply the same rules.
+pub(crate) fn is_valid_name(name: &str, allow_colon: bool) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|b| is_name_start(b, allow_colon))
+        && bytes.all(|b| is_name_continue(b, allow_colon))
+}
+
 /// Parse a single (already delimited) line.
 ///
 /// `start..end` is the line content excluding the newline and trailing `\r`.

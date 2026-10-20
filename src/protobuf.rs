@@ -30,7 +30,10 @@ use crate::{
         Sample,
         TimeSeries,
     },
-    parser::MAX_LABELS_PER_SERIES,
+    parser::{
+        MAX_LABELS_PER_SERIES,
+        is_valid_name,
+    },
 };
 
 /// Media type of the protobuf exposition format (without parameters).
@@ -249,6 +252,9 @@ fn convert_family(
     if name.is_empty() {
         return Err("metric family without a name".to_owned());
     }
+    if !is_valid_name(name, true) {
+        return Err(format!("invalid metric name {name:?}"));
+    }
     let raw_type = family.r#type.unwrap_or_default();
     let kind =
         MetricType::try_from(raw_type).map_err(|_| format!("unknown metric type {raw_type}"))?;
@@ -317,8 +323,8 @@ fn base_labels(name: &str, pairs: &[dto::LabelPair]) -> Result<Vec<Label>, Strin
     labels.push(Label::new(METRIC_NAME_LABEL, name));
     for pair in pairs {
         let label_name = pair.name.as_deref().unwrap_or_default();
-        if label_name.is_empty() {
-            return Err("empty label name".to_owned());
+        if !is_valid_name(label_name, false) {
+            return Err(format!("invalid label name {label_name:?}"));
         }
         labels.push(Label::new(
             label_name,
@@ -1353,7 +1359,7 @@ mod tests {
             ),
             (
                 family("m", dto::MetricType::Counter, vec![counter(&[("", "x")])]),
-                "empty label name",
+                "invalid label name \"\"",
             ),
             (
                 family(
@@ -1398,6 +1404,40 @@ mod tests {
         )
         .expect_err("duplicate");
         assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    /// Names follow the text format's character rules, so a target cannot
+    /// get names past the agent that a remote-write receiver would reject.
+    #[test]
+    fn names_follow_the_text_format_rules() {
+        let series = |name: &str, label: &str| {
+            let metric = dto::Metric {
+                label: label_pairs(&[(label, "x")]),
+                counter: Some(dto::Counter { value: Some(1.0) }),
+                ..dto::Metric::default()
+            };
+            parse(
+                &body(&[family(name, dto::MetricType::Counter, vec![metric])]),
+                TS,
+                options(),
+            )
+            .map(|series| series.len())
+            .map_err(|err| err.to_string())
+        };
+
+        for (name, label, expected) in [
+            ("m", "a-b", "invalid label name \"a-b\""),
+            ("m", "a:b", "invalid label name \"a:b\""),
+            ("m", "1a", "invalid label name \"1a\""),
+            ("my.metric", "a", "invalid metric name \"my.metric\""),
+            ("1m", "a", "invalid metric name \"1m\""),
+            ("métric", "a", "invalid metric name \"métric\""),
+        ] {
+            let err = series(name, label).expect_err(expected);
+            assert!(err.contains(expected), "{err} vs {expected}");
+        }
+        // Colons stay valid in metric names (recording-rule style).
+        assert_eq!(series("job:requests:rate5m", "_a1"), Ok(1));
     }
 
     #[test]
