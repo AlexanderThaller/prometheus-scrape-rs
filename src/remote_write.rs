@@ -267,7 +267,14 @@ impl Endpoint {
         }
 
         let series_count = batch.len();
-        let sample_count = batch.len() as u64;
+        let histogram_count = batch
+            .iter()
+            .filter(|series| series.histogram.is_some())
+            .count() as u64;
+        let written = Written {
+            samples: batch.len() as u64 - histogram_count,
+            histograms: histogram_count,
+        };
         proto_buf.clear();
         match self.protocol {
             ProtobufMessage::WriteRequestV1 => {
@@ -291,7 +298,7 @@ impl Endpoint {
         let mut attempt = 0u32;
         loop {
             attempt += 1;
-            match self.send_once(compressed.clone(), sample_count).await {
+            match self.send_once(compressed.clone(), written).await {
                 Ok(()) => {
                     crate::telemetry::METRICS.remote_write_batches_total.inc();
                     crate::telemetry::METRICS
@@ -333,7 +340,7 @@ impl Endpoint {
         }
     }
 
-    async fn send_once(&self, body: bytes::Bytes, sample_count: u64) -> Result<(), SendError> {
+    async fn send_once(&self, body: bytes::Bytes, sent: Written) -> Result<(), SendError> {
         let (content_type, version) = match self.protocol {
             ProtobufMessage::WriteRequestV1 => ("application/x-protobuf", "0.1.0"),
             ProtobufMessage::WriteRequestV2 => (
@@ -362,22 +369,37 @@ impl Endpoint {
             // Remote-write 2.0 receivers report what they actually wrote;
             // a 2xx with fewer samples written than sent is a partial write
             // that would otherwise be silent (the failure mode of
-            // grafana/mimir#12622/#13576).
+            // grafana/mimir#12622/#13576). Float samples and histograms are
+            // reported separately.
             if self.protocol == ProtobufMessage::WriteRequestV2 {
-                let written = response
-                    .headers()
-                    .get("X-Prometheus-Remote-Write-Samples-Written")
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.parse::<u64>().ok());
-                if let Some(written) = written
-                    && written < sample_count
-                {
-                    warn!(
-                        endpoint = self.name,
-                        sent = sample_count,
-                        written,
-                        "receiver accepted the request but wrote fewer samples than sent"
-                    );
+                for (header, sent, kind) in [
+                    (
+                        "X-Prometheus-Remote-Write-Samples-Written",
+                        sent.samples,
+                        "samples",
+                    ),
+                    (
+                        "X-Prometheus-Remote-Write-Histograms-Written",
+                        sent.histograms,
+                        "histograms",
+                    ),
+                ] {
+                    let written = response
+                        .headers()
+                        .get(header)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(|value| value.parse::<u64>().ok());
+                    if let Some(written) = written
+                        && written < sent
+                    {
+                        warn!(
+                            endpoint = self.name,
+                            kind,
+                            sent,
+                            written,
+                            "receiver accepted the request but wrote fewer than sent"
+                        );
+                    }
                 }
             }
             return Ok(());
@@ -395,6 +417,14 @@ impl Endpoint {
 enum SendError {
     Recoverable(String),
     Unrecoverable(String),
+}
+
+/// What one request carries, compared against the counts a remote-write
+/// 2.0 receiver reports back.
+#[derive(Debug, Clone, Copy)]
+struct Written {
+    samples: u64,
+    histograms: u64,
 }
 
 type FxMap<'a> =
@@ -505,8 +535,8 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
         if !refs.is_empty() {
             series_len += 1 + varint_len(packed as u64) + packed;
         }
-        let sample_len = series.sample.wire_len();
-        series_len += 1 + varint_len(sample_len as u64) + sample_len;
+        let value_len = series.value_wire_len();
+        series_len += 1 + varint_len(value_len as u64) + value_len;
         buf.push(0x2a);
         put_varint(series_len as u64, buf);
         // Field 1: packed uint32 labels_refs (omitted when empty, matching
@@ -518,10 +548,9 @@ fn encode_v2_into(batch: &[TimeSeries], buf: &mut Vec<u8>, scratch: &mut V2Scrat
                 put_varint(u64::from(reference), buf);
             }
         }
-        // Field 2: the single sample, as a repeated field of one.
-        buf.push(0x12);
-        put_varint(sample_len as u64, buf);
-        series.sample.put_fields(buf);
+        // Field 2 (samples) or 3 (histograms): the series' single value,
+        // as a repeated field of one.
+        series.put_value(0x12, 0x1a, buf);
     }
 }
 
@@ -544,6 +573,7 @@ mod tests {
         Label,
         Sample,
         TimeSeriesV2,
+        WireHistogram,
         WriteRequestV2,
     };
 
@@ -574,9 +604,20 @@ mod tests {
                     labels_refs.push(intern(&mut symbols, &label.name));
                     labels_refs.push(intern(&mut symbols, &label.value));
                 }
-                TimeSeriesV2 {
-                    labels_refs,
-                    samples: vec![series.sample],
+                match &series.histogram {
+                    Some(histogram) => TimeSeriesV2 {
+                        labels_refs,
+                        samples: Vec::new(),
+                        histograms: vec![WireHistogram::from_histogram(
+                            histogram,
+                            series.sample.timestamp,
+                        )],
+                    },
+                    None => TimeSeriesV2 {
+                        labels_refs,
+                        samples: vec![series.sample],
+                        histograms: Vec::new(),
+                    },
                 }
             })
             .collect();
@@ -608,6 +649,7 @@ mod tests {
                         timestamp: 1_395_066_363_000,
                     },
                     identity_hash: 0,
+                    histogram: None,
                 },
                 TimeSeries {
                     labels: vec![
@@ -619,8 +661,40 @@ mod tests {
                         timestamp: -1,
                     },
                     identity_hash: 0,
+                    histogram: None,
                 },
             ],
+            // Native histograms interleaved with float samples.
+            crate::model::tests::sample_histograms()
+                .into_iter()
+                .enumerate()
+                .flat_map(|(i, histogram)| {
+                    let labels = vec![
+                        Label::new("__name__", format!("histogram_{i}")),
+                        Label::new("job", "node"),
+                    ];
+                    [
+                        TimeSeries {
+                            labels: labels.clone(),
+                            sample: Sample {
+                                value: 0.0,
+                                timestamp: 1_700_000_000_000,
+                            },
+                            identity_hash: 0,
+                            histogram: Some(Box::new(histogram)),
+                        },
+                        TimeSeries {
+                            labels,
+                            sample: Sample {
+                                value: 3.0,
+                                timestamp: 1_700_000_000_000,
+                            },
+                            identity_hash: 0,
+                            histogram: None,
+                        },
+                    ]
+                })
+                .collect(),
         ];
         for batch in batches {
             let mut buf = Vec::new();
@@ -659,6 +733,7 @@ mod tests {
                 timestamp,
             },
             identity_hash: 0,
+            histogram: None,
         }
     }
 
@@ -678,7 +753,7 @@ mod tests {
         let (chunk, samples) = split_batch(&mut pending, 100);
         assert_eq!(chunk.len(), 2);
         assert_eq!(samples, 2);
-        assert!(pending.is_empty());
+        assert_eq!(pending, Vec::<TimeSeries>::new());
     }
 
     #[test]
@@ -691,6 +766,7 @@ mod tests {
                     timestamp: 10,
                 },
                 identity_hash: 0,
+                histogram: None,
             },
             TimeSeries {
                 labels: vec![Label::new("__name__", "up"), Label::new("job", "other")],
@@ -699,6 +775,7 @@ mod tests {
                     timestamp: 10,
                 },
                 identity_hash: 0,
+                histogram: None,
             },
         ];
         let request = encode_v2(batch);

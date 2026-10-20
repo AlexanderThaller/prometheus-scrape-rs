@@ -24,7 +24,7 @@ use crate::model::{
 ///
 /// No legitimate exposition line comes close; the cap keeps a hostile target
 /// from making one line cost arbitrarily much time and memory.
-const MAX_LABELS_PER_SERIES: usize = 128;
+pub(crate) const MAX_LABELS_PER_SERIES: usize = 128;
 
 /// Label count up to which duplicate names are detected with a linear scan
 /// over the labels parsed so far.
@@ -171,6 +171,14 @@ fn is_name_continue(b: u8, allow_colon: bool) -> bool {
     class & NAME_CONTINUE != 0 || (allow_colon && class & NAME_COLON != 0)
 }
 
+/// Whether `name` is a metric name (`allow_colon`) or label name the text
+/// format accepts, so other exposition formats apply the same rules.
+pub(crate) fn is_valid_name(name: &str, allow_colon: bool) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|b| is_name_start(b, allow_colon))
+        && bytes.all(|b| is_name_continue(b, allow_colon))
+}
+
 /// Parse a single (already delimited) line.
 ///
 /// `start..end` is the line content excluding the newline and trailing `\r`.
@@ -313,6 +321,7 @@ fn parse_line(
         labels,
         sample: Sample { value, timestamp },
         identity_hash,
+        histogram: None,
     }))
 }
 
@@ -848,11 +857,17 @@ rpc_duration_seconds_count 2693
 
     #[test]
     fn empty_and_comment_only_bodies() -> Result<(), ParseError> {
-        assert!(parse("", TS, true)?.is_empty());
-        assert!(parse("   \n\t\n  \n", TS, true)?.is_empty());
-        assert!(parse("# HELP x\n# TYPE x counter\n", TS, true)?.is_empty());
+        assert_eq!(parse("", TS, true)?, Vec::<TimeSeries>::new());
+        assert_eq!(parse("   \n\t\n  \n", TS, true)?, Vec::<TimeSeries>::new());
+        assert_eq!(
+            parse("# HELP x\n# TYPE x counter\n", TS, true)?,
+            Vec::<TimeSeries>::new()
+        );
         // Indented comment.
-        assert!(parse("   # a comment\n", TS, true)?.is_empty());
+        assert_eq!(
+            parse("   # a comment\n", TS, true)?,
+            Vec::<TimeSeries>::new()
+        );
         Ok(())
     }
 

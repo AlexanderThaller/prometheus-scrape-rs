@@ -2,6 +2,7 @@
 //! one jittered scrape loop per target.
 
 use std::{
+    fmt::Write as _,
     hash::Hasher as _,
     sync::Arc,
     time::{
@@ -27,6 +28,7 @@ use crate::{
         Config,
         GlobalConfig,
         ScrapeConfig,
+        ScrapeProtocol,
     },
     model::{
         Label,
@@ -208,6 +210,10 @@ struct Target {
     /// Maximum decoded response body accepted from the target, in bytes.
     /// `0` disables the limit.
     body_size_limit: u64,
+    /// `Accept` header offering the job's `scrape_protocols`.
+    accept: String,
+    /// Conversion settings for protobuf bodies (native histograms).
+    protobuf: crate::protobuf::Options,
     /// Keep per-series state so vanished series get staleness markers.
     /// Off unless `--staleness.enable-tracking` was given.
     track_staleness: bool,
@@ -240,6 +246,13 @@ fn build_targets(
     track_staleness: bool,
 ) -> Vec<Target> {
     let mut targets = Vec::new();
+    let accept = accept_header(&job.protocols(global));
+    let protobuf = crate::protobuf::Options {
+        honor_timestamps: job.honor_timestamps,
+        native_histograms: job.native_histograms(global),
+        classic_histograms: job.classic_histograms(global),
+        bucket_limit: job.native_histogram_bucket_limit,
+    };
     for group in groups {
         for address in &group.targets {
             let mut labels: Vec<Label> = Vec::with_capacity(group.labels.len() + 8);
@@ -298,6 +311,8 @@ fn build_targets(
                 honor_timestamps: job.honor_timestamps,
                 sample_limit: job.sample_limit,
                 body_size_limit: job.body_size_limit.as_bytes(),
+                accept: accept.clone(),
+                protobuf,
                 track_staleness,
                 metric_relabel_configs: job.metric_relabel_configs.clone(),
                 external_labels: Arc::clone(external_labels),
@@ -305,6 +320,94 @@ fn build_targets(
         }
     }
     targets
+}
+
+/// Prometheus' `acceptHeader`: the protocols in preference order with
+/// descending q-values, then a catch-all below them.
+fn accept_header(protocols: &[ScrapeProtocol]) -> String {
+    // Prometheus starts at one above its number of known protocols (5), so
+    // the values match its header for the same list.
+    let mut weight = 6usize;
+    let mut header = String::new();
+    for protocol in protocols {
+        header.push_str(protocol.media_type());
+        let _ = write!(header, ";q=0.{weight},");
+        weight = weight.saturating_sub(1);
+    }
+    let _ = write!(header, "*/*;q=0.{weight}");
+    header
+}
+
+/// Wire format of a scrape body, from the response's `Content-Type`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyFormat {
+    /// Text exposition format; also assumed when the type is missing or
+    /// unknown, as before protobuf support.
+    Text,
+    /// Delimited `io.prometheus.client.MetricFamily` messages.
+    Protobuf,
+}
+
+impl BodyFormat {
+    fn from_content_type(content_type: Option<&str>) -> anyhow::Result<Self> {
+        let Some(content_type) = content_type else {
+            return Ok(Self::Text);
+        };
+        let mut parts = content_type.split(';');
+        let media_type = parts.next().unwrap_or_default().trim();
+        if media_type.to_lowercase() != crate::protobuf::MEDIA_TYPE {
+            return Ok(Self::Text);
+        }
+        let mut proto = "";
+        let mut encoding = "";
+        for parameter in parts {
+            if let Some((key, value)) = parameter.split_once('=') {
+                let value = value.trim().trim_matches('"');
+                match key.trim().to_lowercase().as_str() {
+                    "proto" => proto = value,
+                    "encoding" => encoding = value,
+                    _ => {}
+                }
+            }
+        }
+        if proto != crate::protobuf::MESSAGE_TYPE {
+            anyhow::bail!("unsupported protobuf message type {proto:?} in {content_type:?}");
+        }
+        if encoding != "delimited" {
+            anyhow::bail!("unsupported protobuf encoding {encoding:?} in {content_type:?}");
+        }
+        Ok(Self::Protobuf)
+    }
+}
+
+/// A fetched scrape body and the format it is in.
+#[derive(Debug, Clone)]
+struct ScrapeBody {
+    bytes: bytes::Bytes,
+    format: BodyFormat,
+}
+
+/// Parse a scrape body with the parser for its format. Shared by live
+/// scrapes and staleness re-derivation, which must produce the same series.
+fn parse_body(
+    target: &Target,
+    body: &[u8],
+    format: BodyFormat,
+    default_timestamp_ms: i64,
+) -> Result<Vec<TimeSeries>, String> {
+    match format {
+        BodyFormat::Text => {
+            // Validation instead of a lossy conversion: no full-body copy
+            // per scrape, and a body Prometheus could not have parsed
+            // anyway becomes a scrape error, not mojibake.
+            let text = std::str::from_utf8(body)
+                .map_err(|err| format!("scrape body is not valid UTF-8: {err}"))?;
+            crate::parser::parse(text, default_timestamp_ms, target.honor_timestamps)
+                .map_err(|err| format!("scrape body failed to parse: {err}"))
+        }
+        BodyFormat::Protobuf => crate::protobuf::parse(body, default_timestamp_ms, target.protobuf)
+            .map_err(|err| format!("protobuf scrape body failed to parse: {err}")),
+    }
 }
 
 async fn scrape_loop(
@@ -446,6 +549,7 @@ struct RetainedScrape {
     /// dependency; zstd's better ratio (11.5x) was not worth a C dependency
     /// in the static musl build.
     compressed: Vec<u8>,
+    format: BodyFormat,
     start_ms: i64,
 }
 
@@ -459,7 +563,7 @@ impl SeriesTracker {
         &mut self,
         target: &Target,
         batch: &[TimeSeries],
-        retained_body: Option<bytes::Bytes>,
+        retained_body: Option<ScrapeBody>,
         start_ms: i64,
     ) -> Vec<TimeSeries> {
         let mut current: Vec<u64> = batch
@@ -489,9 +593,10 @@ impl SeriesTracker {
             None => self.retained = None,
             Some(body) => {
                 if self.retained.is_none() || self.hashes != current {
-                    self.retained = match self.encoder.compress_vec(&body) {
+                    self.retained = match self.encoder.compress_vec(&body.bytes) {
                         Ok(compressed) => Some(RetainedScrape {
                             compressed,
+                            format: body.format,
                             start_ms,
                         }),
                         Err(err) => {
@@ -547,21 +652,15 @@ impl SeriesTracker {
             );
             return Vec::new();
         };
-        let Ok(body) = std::str::from_utf8(&body) else {
-            warn!(
-                url = target.url,
-                "retained scrape body is not valid UTF-8 after decompression; staleness markers \
-                 skipped"
-            );
-            return Vec::new();
-        };
-        let Ok(series) = crate::parser::parse(body, retained.start_ms, target.honor_timestamps)
-        else {
-            warn!(
-                url = target.url,
-                "retained scrape body failed to re-parse; staleness markers skipped"
-            );
-            return Vec::new();
+        let series = match parse_body(target, &body, retained.format, retained.start_ms) {
+            Ok(series) => series,
+            Err(err) => {
+                warn!(
+                    url = target.url,
+                    err, "retained scrape body failed to re-parse; staleness markers skipped"
+                );
+                return Vec::new();
+            }
         };
         let mut consumed = vec![false; vanished.len()];
         let mut markers = Vec::with_capacity(vanished.len());
@@ -626,6 +725,7 @@ fn stale_series(labels: Vec<Label>, timestamp: i64) -> TimeSeries {
             timestamp,
         },
         identity_hash: 0,
+        histogram: None,
     }
 }
 
@@ -636,7 +736,7 @@ struct ScrapeOutcome {
     report: Vec<TimeSeries>,
     /// Raw exposition body, present only when staleness tracking is on and
     /// `series` was actually emitted — tracking must reflect what was sent.
-    retained_body: Option<bytes::Bytes>,
+    retained_body: Option<ScrapeBody>,
     start_ms: i64,
     error: Option<String>,
 }
@@ -659,51 +759,38 @@ async fn scrape_once(
     let mut batch: Vec<TimeSeries> = Vec::new();
 
     match result {
-        Ok(body) => {
-            // Validation instead of `text()`'s lossy conversion: no
-            // full-body copy per scrape, and a body Prometheus could not
-            // have parsed anyway becomes a scrape error, not mojibake.
-            match std::str::from_utf8(&body) {
-                Err(err) => {
-                    error = Some(format!("scrape body is not valid UTF-8: {err}"));
+        Ok(body) => match parse_body(target, &body.bytes, body.format, start_ms) {
+            Ok(series) => {
+                scraped = series.len();
+                crate::telemetry::METRICS
+                    .samples_scraped_total
+                    .add(scraped as u64);
+                if target.sample_limit > 0 && scraped as u64 > target.sample_limit {
+                    error = Some(format!(
+                        "sample_limit exceeded ({scraped} > {}); scrape discarded",
+                        target.sample_limit
+                    ));
+                } else {
+                    up = 1.0;
+                    batch.reserve(series.len() + 5);
+                    for mut single in series {
+                        // identity_hash stays as the parser set it.
+                        let Some(labels) =
+                            finalize_series_labels(std::mem::take(&mut single.labels), target)
+                        else {
+                            continue;
+                        };
+                        single.labels = labels;
+                        batch.push(single);
+                    }
+                    kept = batch.len();
+                    if target.track_staleness {
+                        retained_body = Some(body);
+                    }
                 }
-                Ok(text) => match crate::parser::parse(text, start_ms, target.honor_timestamps) {
-                    Ok(series) => {
-                        scraped = series.len();
-                        crate::telemetry::METRICS
-                            .samples_scraped_total
-                            .add(scraped as u64);
-                        if target.sample_limit > 0 && scraped as u64 > target.sample_limit {
-                            error = Some(format!(
-                                "sample_limit exceeded ({scraped} > {}); scrape discarded",
-                                target.sample_limit
-                            ));
-                        } else {
-                            up = 1.0;
-                            batch.reserve(series.len() + 5);
-                            for mut single in series {
-                                // identity_hash stays as the parser set it.
-                                let Some(labels) = finalize_series_labels(
-                                    std::mem::take(&mut single.labels),
-                                    target,
-                                ) else {
-                                    continue;
-                                };
-                                single.labels = labels;
-                                batch.push(single);
-                            }
-                            kept = batch.len();
-                            if target.track_staleness {
-                                retained_body = Some(body);
-                            }
-                        }
-                    }
-                    Err(err) => {
-                        error = Some(format!("scrape body failed to parse: {err}"));
-                    }
-                },
             }
-        }
+            Err(message) => error = Some(message),
+        },
         Err(err) => {
             error = Some(format!("{err:#}"));
         }
@@ -734,6 +821,7 @@ async fn scrape_once(
                 timestamp: start_ms,
             },
             identity_hash: 0,
+            histogram: None,
         });
     }
     ScrapeOutcome {
@@ -749,13 +837,10 @@ async fn fetch(
     target: &Target,
     client: &reqwest::Client,
     credentials: &Credentials,
-) -> anyhow::Result<bytes::Bytes> {
+) -> anyhow::Result<ScrapeBody> {
     let mut builder = client
         .get(&target.url)
-        .header(
-            reqwest::header::ACCEPT,
-            "text/plain;version=0.0.4;q=0.5,*/*;q=0.1",
-        )
+        .header(reqwest::header::ACCEPT, &target.accept)
         .header(
             "X-Prometheus-Scrape-Timeout-Seconds",
             format!("{}", target.timeout.as_secs_f64()),
@@ -769,7 +854,14 @@ async fn fetch(
     if !status.is_success() {
         anyhow::bail!("server returned HTTP {status}");
     }
-    read_body(&mut response, target.body_size_limit).await
+    let format = BodyFormat::from_content_type(
+        response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+    )?;
+    let bytes = read_body(&mut response, target.body_size_limit).await?;
+    Ok(ScrapeBody { bytes, format })
 }
 
 /// Read the response body, refusing to buffer more than `limit` decoded bytes
@@ -956,6 +1048,12 @@ mod tests {
             honor_timestamps: true,
             sample_limit: 0,
             body_size_limit: 0,
+            accept: accept_header(&[ScrapeProtocol::PrometheusText0_0_4]),
+            protobuf: crate::protobuf::Options {
+                honor_timestamps: true,
+                native_histograms: true,
+                ..crate::protobuf::Options::default()
+            },
             track_staleness: true,
             metric_relabel_configs: Vec::new(),
             external_labels: Arc::new([Label::new("origin", "tracker-test")]),
@@ -963,8 +1061,11 @@ mod tests {
     }
 
     /// A scrape body as the tracker receives it from `fetch`.
-    fn retained(body: &str) -> bytes::Bytes {
-        bytes::Bytes::copy_from_slice(body.as_bytes())
+    fn retained(body: &str) -> ScrapeBody {
+        ScrapeBody {
+            bytes: bytes::Bytes::copy_from_slice(body.as_bytes()),
+            format: BodyFormat::Text,
+        }
     }
 
     /// Reproduce the live pipeline for a raw body: parse + finalize labels
@@ -992,10 +1093,9 @@ mod tests {
         let body1 = "metric_a{case=\"x\"} 1\nmetric_b 2\nexplicit 3 500\n";
         let ts1 = 1_000;
         let batch1 = simulate_scrape(&target, body1, ts1);
-        assert!(
-            tracker
-                .advance(&target, &batch1, Some(retained(body1)), ts1)
-                .is_empty()
+        assert_eq!(
+            tracker.advance(&target, &batch1, Some(retained(body1)), ts1),
+            Vec::<TimeSeries>::new()
         );
         assert_eq!(tracker.hashes.len(), 2);
 
@@ -1023,23 +1123,22 @@ mod tests {
         assert_eq!(markers.len(), 1);
         assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_a");
         assert_eq!(get_label(&markers[0].labels, "case"), "x");
-        assert!(tracker.hashes.is_empty());
+        assert_eq!(tracker.hashes, Vec::<u64>::new());
         assert!(tracker.retained.is_none());
 
         // Recovery: series returns, no markers.
         let ts4 = 4_000;
         let batch4 = simulate_scrape(&target, body2, ts4);
-        assert!(
-            tracker
-                .advance(&target, &batch4, Some(retained(body2)), ts4)
-                .is_empty()
+        assert_eq!(
+            tracker.advance(&target, &batch4, Some(retained(body2)), ts4),
+            Vec::<TimeSeries>::new()
         );
 
         // Target removal drains everything tracked.
         let markers = tracker.drain_all(&target, 5_000);
         assert_eq!(markers.len(), 1);
         assert_eq!(get_label(&markers[0].labels, METRIC_NAME_LABEL), "metric_a");
-        assert!(tracker.hashes.is_empty());
+        assert_eq!(tracker.hashes, Vec::<u64>::new());
         assert!(tracker.retained.is_none());
     }
 
@@ -1057,10 +1156,9 @@ mod tests {
             (3_000, "metric_a 9\nmetric_b 10\n"),
         ] {
             let batch = simulate_scrape(&target, body, timestamp);
-            assert!(
-                tracker
-                    .advance(&target, &batch, Some(retained(body)), timestamp)
-                    .is_empty()
+            assert_eq!(
+                tracker.advance(&target, &batch, Some(retained(body)), timestamp),
+                Vec::<TimeSeries>::new()
             );
         }
         let retained_scrape = tracker.retained.as_ref().expect("body retained");
@@ -1156,5 +1254,149 @@ relabel_configs:
             "staleness tracking is opt-in per --staleness.enable-tracking"
         );
         Ok(())
+    }
+
+    #[test]
+    fn accept_header_matches_prometheus() {
+        assert_eq!(
+            accept_header(&[ScrapeProtocol::PrometheusText0_0_4]),
+            "text/plain;version=0.0.4;q=0.6,*/*;q=0.5"
+        );
+        assert_eq!(
+            accept_header(&[
+                ScrapeProtocol::PrometheusProto,
+                ScrapeProtocol::PrometheusText0_0_4,
+            ]),
+            "application/vnd.google.protobuf;proto=io.prometheus.client.MetricFamily;\
+             encoding=delimited;q=0.6,text/plain;version=0.0.4;q=0.5,*/*;q=0.4"
+        );
+    }
+
+    #[test]
+    fn body_format_follows_content_type() {
+        for (content_type, expected) in [
+            (None, BodyFormat::Text),
+            (
+                Some("text/plain; version=0.0.4; charset=utf-8"),
+                BodyFormat::Text,
+            ),
+            (Some("application/openmetrics-text"), BodyFormat::Text),
+            (
+                Some(
+                    "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; \
+                     encoding=delimited",
+                ),
+                BodyFormat::Protobuf,
+            ),
+            (
+                Some(
+                    "Application/Vnd.Google.Protobuf;Encoding=delimited;proto=\"io.prometheus.\
+                     client.MetricFamily\"",
+                ),
+                BodyFormat::Protobuf,
+            ),
+        ] {
+            assert_eq!(
+                BodyFormat::from_content_type(content_type).expect("supported"),
+                expected,
+                "{content_type:?}"
+            );
+        }
+        for unsupported in [
+            "application/vnd.google.protobuf; proto=io.prometheus.client.MetricFamily; \
+             encoding=text",
+            "application/vnd.google.protobuf; proto=other.Message; encoding=delimited",
+            "application/vnd.google.protobuf",
+        ] {
+            assert!(
+                BodyFormat::from_content_type(Some(unsupported)).is_err(),
+                "{unsupported}"
+            );
+        }
+    }
+
+    /// A protobuf body: one counter and one native histogram per entry of
+    /// `histograms`.
+    fn protobuf_body(histograms: &[&str]) -> ScrapeBody {
+        use prost::Message as _;
+
+        use crate::protobuf::dto;
+
+        let native = |name: &str| dto::MetricFamily {
+            name: Some(name.to_owned()),
+            r#type: Some(dto::MetricType::Histogram as i32),
+            metric: vec![dto::Metric {
+                histogram: Some(dto::Histogram {
+                    sample_count: Some(1),
+                    schema: Some(0),
+                    positive_span: vec![dto::BucketSpan {
+                        offset: Some(0),
+                        length: Some(1),
+                    }],
+                    positive_delta: vec![1],
+                    ..dto::Histogram::default()
+                }),
+                ..dto::Metric::default()
+            }],
+        };
+        let mut families = vec![dto::MetricFamily {
+            name: Some("requests_total".to_owned()),
+            r#type: Some(dto::MetricType::Counter as i32),
+            metric: vec![dto::Metric {
+                counter: Some(dto::Counter { value: Some(1.0) }),
+                ..dto::Metric::default()
+            }],
+        }];
+        families.extend(histograms.iter().map(|name| native(name)));
+        let mut bytes = Vec::new();
+        for family in families {
+            family
+                .encode_length_delimited(&mut bytes)
+                .expect("Vec grows as needed");
+        }
+        ScrapeBody {
+            bytes: bytes.into(),
+            format: BodyFormat::Protobuf,
+        }
+    }
+
+    fn simulate_body(target: &Target, body: &ScrapeBody, start_ms: i64) -> Vec<TimeSeries> {
+        parse_body(target, &body.bytes, body.format, start_ms)
+            .expect("body parses")
+            .into_iter()
+            .filter_map(|mut single| {
+                single.labels = finalize_series_labels(std::mem::take(&mut single.labels), target)?;
+                Some(single)
+            })
+            .collect()
+    }
+
+    /// A vanished native histogram gets a (float) staleness marker, like in
+    /// Prometheus, re-derived from the retained protobuf body.
+    #[test]
+    fn native_histogram_staleness_from_protobuf_body() {
+        let target = test_target();
+        let mut tracker = SeriesTracker::default();
+
+        let body1 = protobuf_body(&["latency_seconds", "size_bytes"]);
+        let batch1 = simulate_body(&target, &body1, 1_000);
+        assert_eq!(batch1.iter().filter(|s| s.histogram.is_some()).count(), 2);
+        assert_eq!(
+            tracker.advance(&target, &batch1, Some(body1), 1_000),
+            Vec::<TimeSeries>::new()
+        );
+        assert_eq!(tracker.hashes.len(), 3);
+
+        let body2 = protobuf_body(&["latency_seconds"]);
+        let batch2 = simulate_body(&target, &body2, 2_000);
+        let markers = tracker.advance(&target, &batch2, Some(body2), 2_000);
+        assert_eq!(markers.len(), 1);
+        assert_eq!(
+            get_label(&markers[0].labels, METRIC_NAME_LABEL),
+            "size_bytes"
+        );
+        assert_eq!(get_label(&markers[0].labels, "job"), "test");
+        assert!(crate::model::is_stale_nan(markers[0].sample.value));
+        assert!(markers[0].histogram.is_none());
     }
 }

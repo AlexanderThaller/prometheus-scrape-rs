@@ -9,6 +9,7 @@ pub mod model;
 pub mod parser;
 #[doc(hidden)]
 pub mod pgo;
+pub mod protobuf;
 pub mod relabel;
 pub mod remote_write;
 pub mod scrape;

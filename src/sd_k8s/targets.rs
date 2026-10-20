@@ -233,7 +233,7 @@ fn find_container_id(
 /// pod.Spec.InitContainers...)` plus the `i >= len(Containers)` init check.
 fn all_containers(pod: &Pod) -> Vec<(&Container, bool)> {
     let spec = pod.spec.as_ref();
-    let regular = spec.map(|s| s.containers.as_slice()).unwrap_or_default();
+    let regular = spec.map_or_default(|s| s.containers.as_slice());
     let init = spec
         .and_then(|s| s.init_containers.as_deref())
         .unwrap_or_default();
@@ -897,7 +897,7 @@ mod tests {
         let mut pod = sample_pod();
         pod.status.as_mut().unwrap().pod_ip = None;
         let groups = pod_target_groups(&[Arc::new(pod)], None);
-        assert!(groups.is_empty());
+        assert_eq!(groups, Vec::<TargetGroup>::new());
     }
 
     #[test]
@@ -935,7 +935,10 @@ mod tests {
 
         // A pod on a node absent from the store is dropped entirely.
         let empty: HashMap<String, Arc<Node>> = HashMap::new();
-        assert!(pod_target_groups(&[pod], Some(&empty)).is_empty());
+        assert_eq!(
+            pod_target_groups(&[pod], Some(&empty)),
+            Vec::<TargetGroup>::new()
+        );
     }
 
     fn endpoint_port(name: &str, number: i32) -> EndpointPort {
